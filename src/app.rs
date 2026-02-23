@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use tower_http::{catch_panic::CatchPanicLayer, trace::TraceLayer};
 
 use crate::{capacity::Capacity, handlers};
@@ -14,6 +17,7 @@ pub fn create_app(capacity: Capacity) -> Router {
 
     Router::new()
         .route("/internal/hc", get(handlers::healthcheck::healthcheck))
+        .route("/vm", post(handlers::vm::create))
         .layer(TraceLayer::new_for_http())
         .layer(CatchPanicLayer::new())
         .with_state(state)

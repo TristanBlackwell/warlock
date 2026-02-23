@@ -1,22 +1,19 @@
 mod common;
 
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 #[tokio::test]
-async fn healthcheck_returns_200_and_expected_message() {
+async fn create_vm_returns_200() {
     let addr = common::get_server_addr().await;
     let client = common::get_client();
 
     let response = timeout(
         Duration::from_secs(5),
-        client.get(format!("http://{}/internal/hc", addr)).send(),
+        client.post(format!("http://{}/vm", addr)).send(),
     )
     .await
     .expect("request timed out")
     .expect("request failed");
 
     assert_eq!(response.status().as_u16(), 200);
-
-    let body = response.text().await.expect("failed to read body");
-    assert_eq!(body, "Alive and kickin");
 }
