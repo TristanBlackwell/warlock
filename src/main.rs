@@ -11,7 +11,7 @@ mod logging;
 async fn main() -> anyhow::Result<()> {
     logging::init();
 
-    info!("Starting warlock server...");
+    info!("Starting warlock v{}...", env!("CARGO_PKG_VERSION"));
 
     firecracker::preflight_check().context("Firecracker pre-flight check failed")?;
 
