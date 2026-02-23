@@ -2,7 +2,7 @@ use reqwest::Client;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
-use warlock::app;
+use warlock::{app, capacity};
 
 async fn get_server_addr() -> SocketAddr {
     static SERVER: once_cell::sync::Lazy<tokio::sync::Mutex<Option<SocketAddr>>> =
@@ -14,7 +14,8 @@ async fn get_server_addr() -> SocketAddr {
             return addr;
         }
 
-        let app = app::create_app();
+        let host_capacity = capacity::available_capacity().expect("Failed to get capacity");
+        let app = app::create_app(host_capacity);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
