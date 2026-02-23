@@ -100,8 +100,20 @@ fn check_firecracker_binary() -> Result<String> {
 /// - Version string cannot be parsed
 /// - Version is below minimum required version
 fn parse_and_validate_version(version_output: &str) -> Result<Version> {
-    // Firecracker outputs format like "v1.14.1" or "1.14.1"
-    let version_str = version_output.trim().trim_start_matches('v');
+    // Firecracker outputs format like "Firecracker v1.14.1" or "v1.14.1" on the first line
+    // Additional lines may contain exit messages and timestamps - ignore them
+    let first_line = version_output
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Version output was empty"))?;
+
+    // Extract version number from the line (might be "Firecracker v1.14.1" or just "v1.14.1")
+    // Split by whitespace and find the part that looks like a version
+    let version_str = first_line
+        .split_whitespace()
+        .find(|s| s.starts_with('v') || s.chars().next().map_or(false, |c| c.is_ascii_digit()))
+        .ok_or_else(|| anyhow::anyhow!("No version number found in output: {}", first_line))?
+        .trim_start_matches('v');
 
     let version =
         Version::parse(version_str).context("Failed to parse Firecracker version string")?;
@@ -219,51 +231,35 @@ mod tests {
     }
 
     #[test]
-    fn test_dev_mode_detection() {
-        // Save original values from both env vars (CI might set WARLOCK_DEV)
-        let original_warlock_dev = std::env::var("WARLOCK_DEV").ok();
-        let original_rust_env = std::env::var("RUST_ENV").ok();
-
-        // Clear both to ensure clean test state
-        unsafe {
-            std::env::remove_var("WARLOCK_DEV");
-            std::env::remove_var("RUST_ENV");
-        }
-
-        // Test WARLOCK_DEV=true
-        unsafe {
-            std::env::set_var("WARLOCK_DEV", "true");
-        }
-        assert!(is_dev_mode());
-
-        // Test WARLOCK_DEV=false
-        unsafe {
-            std::env::set_var("WARLOCK_DEV", "false");
-        }
-        assert!(!is_dev_mode());
-
-        // Test WARLOCK_DEV removed
-        unsafe {
-            std::env::remove_var("WARLOCK_DEV");
-        }
-        assert!(!is_dev_mode());
-
-        // Restore original values
-        if let Some(val) = original_warlock_dev {
-            unsafe {
-                std::env::set_var("WARLOCK_DEV", val);
-            }
-        }
-        if let Some(val) = original_rust_env {
-            unsafe {
-                std::env::set_var("RUST_ENV", val);
-            }
-        }
+    fn test_parse_version_with_multiline_output() {
+        // Real Firecracker output includes exit messages after version
+        let output = "Firecracker v1.14.1\n\n2026-02-23T21:05:34.876998360 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0\n";
+        let result = parse_and_validate_version(output);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Version::new(1, 14, 1));
     }
 
     #[test]
-    fn test_dev_mode_via_rust_env() {
-        // Save original values from both env vars (CI might set WARLOCK_DEV)
+    fn test_parse_version_with_extra_lines() {
+        let output = "v1.15.0\nSome other output\nMore lines here";
+        let result = parse_and_validate_version(output);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Version::new(1, 15, 0));
+    }
+
+    #[test]
+    fn test_parse_version_single_line_still_works() {
+        let result = parse_and_validate_version("v1.14.1");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Version::new(1, 14, 1));
+    }
+
+    // NOTE: All env var assertions live in a single test to avoid race conditions.
+    // Rust runs tests in parallel and env vars are global process state, so
+    // separate tests that mutate env vars will interfere with each other.
+    #[test]
+    fn test_dev_mode_detection() {
+        // Save original values
         let original_warlock_dev = std::env::var("WARLOCK_DEV").ok();
         let original_rust_env = std::env::var("RUST_ENV").ok();
 
@@ -273,32 +269,36 @@ mod tests {
             std::env::remove_var("RUST_ENV");
         }
 
-        // Test RUST_ENV=development
+        // Neither set - not dev mode
+        assert!(!is_dev_mode());
+
+        // WARLOCK_DEV=true - dev mode
+        unsafe { std::env::set_var("WARLOCK_DEV", "true") }
+        assert!(is_dev_mode());
+
+        // WARLOCK_DEV=false - not dev mode
+        unsafe { std::env::set_var("WARLOCK_DEV", "false") }
+        assert!(!is_dev_mode());
+
+        // RUST_ENV=development (with WARLOCK_DEV cleared) - dev mode
         unsafe {
+            std::env::remove_var("WARLOCK_DEV");
             std::env::set_var("RUST_ENV", "development");
         }
         assert!(is_dev_mode());
 
-        // Test RUST_ENV=production
-        unsafe {
-            std::env::set_var("RUST_ENV", "production");
-        }
+        // RUST_ENV=production - not dev mode
+        unsafe { std::env::set_var("RUST_ENV", "production") }
         assert!(!is_dev_mode());
 
         // Restore original values
-        if let Some(val) = original_warlock_dev {
-            unsafe {
-                std::env::set_var("WARLOCK_DEV", val);
-            }
+        match original_warlock_dev {
+            Some(val) => unsafe { std::env::set_var("WARLOCK_DEV", val) },
+            None => unsafe { std::env::remove_var("WARLOCK_DEV") },
         }
-        if let Some(val) = original_rust_env {
-            unsafe {
-                std::env::set_var("RUST_ENV", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("RUST_ENV");
-            }
+        match original_rust_env {
+            Some(val) => unsafe { std::env::set_var("RUST_ENV", val) },
+            None => unsafe { std::env::remove_var("RUST_ENV") },
         }
     }
 }
