@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use semver::Version;
 use std::process::Command;
 use tracing::{info, warn};
@@ -220,49 +220,78 @@ mod tests {
 
     #[test]
     fn test_dev_mode_detection() {
-        // Save original value
-        let original = std::env::var("WARLOCK_DEV").ok();
+        // Save original values from both env vars (CI might set WARLOCK_DEV)
+        let original_warlock_dev = std::env::var("WARLOCK_DEV").ok();
+        let original_rust_env = std::env::var("RUST_ENV").ok();
 
+        // Clear both to ensure clean test state
+        unsafe {
+            std::env::remove_var("WARLOCK_DEV");
+            std::env::remove_var("RUST_ENV");
+        }
+
+        // Test WARLOCK_DEV=true
         unsafe {
             std::env::set_var("WARLOCK_DEV", "true");
         }
         assert!(is_dev_mode());
 
+        // Test WARLOCK_DEV=false
         unsafe {
             std::env::set_var("WARLOCK_DEV", "false");
         }
         assert!(!is_dev_mode());
 
+        // Test WARLOCK_DEV removed
         unsafe {
             std::env::remove_var("WARLOCK_DEV");
         }
         assert!(!is_dev_mode());
 
-        // Restore original value
-        if let Some(val) = original {
+        // Restore original values
+        if let Some(val) = original_warlock_dev {
             unsafe {
                 std::env::set_var("WARLOCK_DEV", val);
+            }
+        }
+        if let Some(val) = original_rust_env {
+            unsafe {
+                std::env::set_var("RUST_ENV", val);
             }
         }
     }
 
     #[test]
     fn test_dev_mode_via_rust_env() {
-        // Save original value
-        let original = std::env::var("RUST_ENV").ok();
+        // Save original values from both env vars (CI might set WARLOCK_DEV)
+        let original_warlock_dev = std::env::var("WARLOCK_DEV").ok();
+        let original_rust_env = std::env::var("RUST_ENV").ok();
 
+        // Clear both to ensure clean test state
+        unsafe {
+            std::env::remove_var("WARLOCK_DEV");
+            std::env::remove_var("RUST_ENV");
+        }
+
+        // Test RUST_ENV=development
         unsafe {
             std::env::set_var("RUST_ENV", "development");
         }
         assert!(is_dev_mode());
 
+        // Test RUST_ENV=production
         unsafe {
             std::env::set_var("RUST_ENV", "production");
         }
         assert!(!is_dev_mode());
 
-        // Restore original value
-        if let Some(val) = original {
+        // Restore original values
+        if let Some(val) = original_warlock_dev {
+            unsafe {
+                std::env::set_var("WARLOCK_DEV", val);
+            }
+        }
+        if let Some(val) = original_rust_env {
             unsafe {
                 std::env::set_var("RUST_ENV", val);
             }
