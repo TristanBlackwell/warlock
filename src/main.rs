@@ -3,6 +3,7 @@ use tracing::info;
 
 mod app;
 mod capacity;
+mod firecracker;
 mod handlers;
 mod logging;
 
@@ -11,6 +12,8 @@ async fn main() -> anyhow::Result<()> {
     logging::init();
 
     info!("Starting warlock server...");
+
+    firecracker::preflight_check().context("Firecracker pre-flight check failed")?;
 
     let host_capacity = capacity::available_capacity()
         .context("Failed to read host capacity during initialisation")?;

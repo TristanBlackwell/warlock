@@ -1,11 +1,12 @@
 use reqwest::Client;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use warlock::{app, capacity};
+use warlock::{app, capacity, firecracker};
 
 /// Returns a shared test server address.
 ///
-/// The server is started once and reused across all tests
+/// The server is started once and reused across all tests for efficiency.
+/// Tests always run in development mode (Firecracker checks are skipped).
 pub async fn get_server_addr() -> SocketAddr {
     static SERVER: once_cell::sync::Lazy<tokio::sync::Mutex<Option<SocketAddr>>> =
         once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(None));
@@ -14,6 +15,14 @@ pub async fn get_server_addr() -> SocketAddr {
     if let Some(addr) = *guard {
         return addr;
     }
+
+    // Ensure tests run in development mode
+    unsafe {
+        std::env::set_var("WARLOCK_DEV", "true");
+    }
+
+    // Run preflight checks (will be skipped in dev mode)
+    firecracker::preflight_check().expect("Firecracker preflight check failed");
 
     let host_capacity = capacity::available_capacity().expect("Failed to get capacity");
     let app = app::create_app(host_capacity);
