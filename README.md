@@ -50,7 +50,34 @@ or:
 ```bash
 make test
 ```
+
+## Deployment
+
+The [release](./.github/workflows/release.yml) workflow will run the application tests and build Warlock for Linux machines on the push of a new tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
 ```
+
+The workflow can also be dispatched manually.
+ 
+## Installation
+
+The [install](./scripts/install.sh) can be used to download and install Warlock on a Linux machine:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TristanBlackwell/warlock/master/install.sh | bash
 ```
+
+This will place Warlock on the device path.
+
+```bash
+warlock
 ```
+
+You can also define variables as when running locally:
+
+```bash
+FIRECRACKER_BIN="./firecracker" warlock
 ```
