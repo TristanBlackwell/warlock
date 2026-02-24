@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::{
     Router,
@@ -13,11 +13,13 @@ pub struct AppState {
 }
 
 pub fn create_app(capacity: Capacity) -> Router {
-    let state = Arc::new(Mutex::new(AppState { capacity }));
+    let state = Arc::new(AppState { capacity });
 
     Router::new()
         .route("/internal/hc", get(handlers::healthcheck::healthcheck))
         .route("/vm", post(handlers::vm::create))
+        .route("/vm/{id}", get(handlers::vm::get))
+        .route("/vm/{id}", post(handlers::vm::delete))
         .layer(TraceLayer::new_for_http())
         .layer(CatchPanicLayer::new())
         .with_state(state)

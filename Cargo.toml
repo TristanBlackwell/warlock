@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { version = "1.0.102", features = ["backtrace"] }
 axum = "0.8.8"
+firecracker-rs-sdk = { version = "0.1.0", features = ["_rt-tokio"] }
 reqwest = "0.13.2"
 semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -15,6 +16,7 @@ tokio = { version = "1.49.0", features = ["full"] }
 tower-http = { version = "0.6.8", features = ["catch-panic", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.21.0", features = ["serde"] }
 
 [dev-dependencies]
 once_cell = "1.20"

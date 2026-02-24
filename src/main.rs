@@ -3,6 +3,7 @@ use tracing::info;
 
 mod app;
 mod capacity;
+mod error;
 mod firecracker;
 mod handlers;
 mod logging;
