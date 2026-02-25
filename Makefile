@@ -6,3 +6,9 @@ start:
 
 test:
 	cargo test
+
+droplet:
+	./scripts/setup-droplet.sh
+
+droplet-destroy:
+	doctl compute droplet delete warlock-dev --force

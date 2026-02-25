@@ -81,3 +81,29 @@ You can also define variables as when running locally:
 ```bash
 FIRECRACKER_BIN="./firecracker" warlock
 ```
+
+## Scripts
+
+There are a few utility scripts to help with development, testing, and deployment.
+
+### Install
+
+The [install.sh](./scripts/install.sh) will download the latest Warlock build from GitHub and install it onto the path of the machine.
+
+### Firecracker
+
+The [install-firecracker.sh](./scripts/install-firecracker.sh) installs the latest Firecracker binary as well as the getting started kernel image and rootfs.
+
+### Droplet
+
+The [setup-droplet.sh](./scripts/setup-droplet.sh) will spin up a $6 / month Droplet on DigitalOcean, then install Firecracker and Warlock, essentially scaffolding a VM in preparation for testing.
+
+There is a few prerequisites to this:
+
+- `doctl` - Install the DigitalOcean CLI with `brew install doctl` (or the respective command for your system).
+- authenticate - Authenticate with DigitalOcean `doctl auth init`, you'll need a token with scopes `account:read`, `droplet:create`, `droplet:delete`, `ssh:create`.
+- SSH key - The script will create a local warlock SSH key (if one doesn't already exist) and upload this to DigitalOcean so the script (and you) can access the VM.
+
+This can be ran via Make: `make droplet`.
+
+You can destroy the machine after creation with `Make droplet-destroy`.

@@ -28,10 +28,10 @@ pub async fn create(State(state): State<Arc<AppState>>) -> Result<Json<InstanceI
     }
 
     // Path to the kernel image
-    const KERNEL: &str = "/foo/bar/vmlinux.bin";
+    const KERNEL: &str = "/opt/firecracker/vmlinux";
 
     // Path to the rootfs
-    const ROOTFS: &str = "/foo/bar/rootfs.ext4";
+    const ROOTFS: &str = "/opt/firecracker/rootfs.ext4";
 
     info!(vm_id = %vm_id, "Creating VM instance");
 
