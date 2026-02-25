@@ -1,14 +1,5 @@
 use sysinfo::System;
 
-/// Represents a virtual machine instance with its resource allocation and runtime information.
-pub struct Vm {
-    pub id: String,
-    pub ram_mb: u64,
-    pub capacity: Capacity,
-    pub socket_path: String,
-    pub process: std::process::Child,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct Capacity {
     /// Total system memory in megabytes.

@@ -8,18 +8,24 @@ use firecracker_rs_sdk::{
     firecracker::FirecrackerOption,
     models::{BootSource, Drive, InstanceInfo, MachineConfiguration},
 };
-use tracing::debug;
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error::ApiError;
 
-pub async fn create(State(_state): State<Arc<AppState>>) -> Result<Json<InstanceInfo>, ApiError> {
+pub async fn create(State(state): State<Arc<AppState>>) -> Result<Json<InstanceInfo>, ApiError> {
     let firecracker =
         std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".to_string());
 
-    // Path at which you want to place the socket at
-    const API_SOCK: &str = "/tmp/firecracker.socket";
+    let vm_id = Uuid::new_v4();
+    let socket_path = format!("/tmp/warlock-{}.socket", vm_id);
+
+    // Clean up any stale socket file from a previous run
+    if std::path::Path::new(&socket_path).exists() {
+        warn!(vm_id = %vm_id, "Removing stale socket file at {}", socket_path);
+        let _ = std::fs::remove_file(&socket_path);
+    }
 
     // Path to the kernel image
     const KERNEL: &str = "/foo/bar/vmlinux.bin";
@@ -27,18 +33,20 @@ pub async fn create(State(_state): State<Arc<AppState>>) -> Result<Json<Instance
     // Path to the rootfs
     const ROOTFS: &str = "/foo/bar/rootfs.ext4";
 
+    info!(vm_id = %vm_id, "Creating VM instance");
+
     // Build an instance with desired options
     let mut instance = FirecrackerOption::new(firecracker)
-        .api_sock(API_SOCK)
-        .id("test-instance")
+        .api_sock(&socket_path)
+        .id(vm_id.to_string())
         .build()?;
 
-    debug!("Firecracker socket instance created");
+    debug!(vm_id = %vm_id, "Firecracker socket instance created");
 
-    // First start the `firecracker` process
+    // Start the firecracker process
     instance.start_vmm().await?;
 
-    debug!("Firecracker socket instance started");
+    debug!(vm_id = %vm_id, "Firecracker VMM started");
 
     instance
         .put_machine_configuration(&MachineConfiguration {
@@ -51,7 +59,7 @@ pub async fn create(State(_state): State<Arc<AppState>>) -> Result<Json<Instance
         })
         .await?;
 
-    debug!("Machine configuration applied");
+    debug!(vm_id = %vm_id, "Machine configuration applied");
 
     // Guest Boot Source
     instance
@@ -62,7 +70,7 @@ pub async fn create(State(_state): State<Arc<AppState>>) -> Result<Json<Instance
         })
         .await?;
 
-    debug!("Boot source added");
+    debug!(vm_id = %vm_id, "Boot source added");
 
     // Guest Drives
     instance
@@ -79,31 +87,57 @@ pub async fn create(State(_state): State<Arc<AppState>>) -> Result<Json<Instance
         })
         .await?;
 
-    debug!("Guest drive added");
-    debug!("Starting instance...");
+    debug!(vm_id = %vm_id, "Guest drive added");
 
     // Start the instance
     instance.start().await?;
 
-    debug!("Instance started");
-
     let desc = instance.describe_instance().await?;
 
-    debug!("Instance details: {:#?}", desc);
+    info!(vm_id = %vm_id, state = ?desc.state, "VM instance started");
+
+    // Register the instance in state
+    state.vms.lock().await.insert(vm_id, instance);
 
     Ok(Json(desc))
 }
 
 pub async fn get(
-    State(_state): State<Arc<AppState>>,
-    Path(_id): Path<Uuid>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
 ) -> Result<Json<InstanceInfo>, ApiError> {
-    todo!()
+    let mut vms = state.vms.lock().await;
+
+    let instance = vms
+        .get_mut(&id)
+        .ok_or_else(|| ApiError::not_found("VM not found"))?;
+
+    let desc = instance.describe_instance().await?;
+
+    Ok(Json(desc))
 }
 
 pub async fn delete(
-    State(_state): State<Arc<AppState>>,
-    Path(_id): Path<Uuid>,
-) -> Result<Json<InstanceInfo>, ApiError> {
-    todo!()
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut vms = state.vms.lock().await;
+
+    let mut instance = vms
+        .remove(&id)
+        .ok_or_else(|| ApiError::not_found("VM not found"))?;
+
+    info!(vm_id = %id, "Stopping VM instance");
+
+    // Attempt graceful shutdown via Ctrl+Alt+Del
+    if let Err(e) = instance.stop().await {
+        error!(vm_id = %id, error = ?e, "Graceful stop failed, instance will be force-terminated on drop");
+    }
+
+    // Instance is dropped here — the SDK's FStack sends SIGTERM and cleans up the socket file
+    drop(instance);
+
+    info!(vm_id = %id, "VM instance terminated and cleaned up");
+
+    Ok(Json(serde_json::json!({ "id": id, "deleted": true })))
 }

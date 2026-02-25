@@ -25,7 +25,7 @@ pub async fn get_server_addr() -> SocketAddr {
     firecracker::preflight_check().expect("Firecracker preflight check failed");
 
     let host_capacity = capacity::available_capacity().expect("Failed to get capacity");
-    let app = app::create_app(host_capacity);
+    let (app, _state) = app::create_app(host_capacity);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
