@@ -3,23 +3,35 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, State},
+    http::StatusCode,
 };
 use firecracker_rs_sdk::{
     firecracker::FirecrackerOption,
-    models::{BootSource, Drive, InstanceInfo, MachineConfiguration},
+    models::{BootSource, Drive, InstanceInfo, InstanceState, MachineConfiguration},
 };
+use serde::Serialize;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error::ApiError;
 
-pub async fn create(State(state): State<Arc<AppState>>) -> Result<Json<InstanceInfo>, ApiError> {
+#[derive(Debug, Serialize)]
+pub struct CreateVmResponse {
+    pub id: Uuid,
+    pub state: InstanceState,
+    pub vmm_version: String,
+}
+
+pub async fn create(
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<CreateVmResponse>), ApiError> {
     let firecracker =
         std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".to_string());
 
     let vm_id = Uuid::new_v4();
     let socket_path = format!("/tmp/warlock-{}.socket", vm_id);
+    let log_path = format!("/tmp/warlock-{}.log", vm_id);
 
     // Clean up any stale socket file from a previous run
     if std::path::Path::new(&socket_path).exists() {
@@ -39,6 +51,8 @@ pub async fn create(State(state): State<Arc<AppState>>) -> Result<Json<InstanceI
     let mut instance = FirecrackerOption::new(firecracker)
         .api_sock(&socket_path)
         .id(vm_id.to_string())
+        .log_path(Some(&log_path))
+        .level("Info")
         .build()?;
 
     debug!(vm_id = %vm_id, "Firecracker socket instance created");
@@ -89,7 +103,8 @@ pub async fn create(State(state): State<Arc<AppState>>) -> Result<Json<InstanceI
 
     debug!(vm_id = %vm_id, "Guest drive added");
 
-    // Start the instance
+    // Start the instance. This returns as soon as Firecracker accepts the
+    // action — the guest OS may still be booting, so we return 202 Accepted.
     instance.start().await?;
 
     let desc = instance.describe_instance().await?;
@@ -99,7 +114,14 @@ pub async fn create(State(state): State<Arc<AppState>>) -> Result<Json<InstanceI
     // Register the instance in state
     state.vms.lock().await.insert(vm_id, instance);
 
-    Ok(Json(desc))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CreateVmResponse {
+            id: vm_id,
+            state: desc.state,
+            vmm_version: desc.vmm_version,
+        }),
+    ))
 }
 
 pub async fn get(

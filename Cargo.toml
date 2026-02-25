@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { version = "1.0.102", features = ["backtrace"] }
 axum = "0.8.8"
-firecracker-rs-sdk = { version = "0.1.0", features = ["_rt-tokio"] }
+firecracker-rs-sdk = { git = "https://github.com/TristanBlackwell/firecracker-rs-sdk.git", rev = "d05b0c5", features = ["_rt-tokio"] }
 reqwest = "0.13.2"
 semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }

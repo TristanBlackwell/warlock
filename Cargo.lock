@@ -289,8 +289,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "firecracker-rs-sdk"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eec506024c009474005fba23d262cd38184ba4d37f8174229f8922e1431f8cf0"
+source = "git+https://github.com/TristanBlackwell/firecracker-rs-sdk.git?rev=d05b0c5#d05b0c518fab21b3f96397a06d50fc439c244251"
 dependencies = [
  "async-trait",
  "bytes",
