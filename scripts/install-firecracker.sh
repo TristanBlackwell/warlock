@@ -68,7 +68,26 @@ fi
 TEMP_DIR=$(mktemp -d)
 
 # ---------------------------------------------------------------------------
-# 1. Install Firecracker binary
+# 1. Create firecracker system user/group and jailer directories
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "Setting up jailer prerequisites..."
+
+if ! id -u firecracker &>/dev/null; then
+  info "Creating 'firecracker' system user (uid/gid 1100)..."
+  $SUDO groupadd --system --gid 1100 firecracker
+  $SUDO useradd --system --uid 1100 --gid 1100 --no-create-home --shell /usr/sbin/nologin firecracker
+  info "Created user 'firecracker' (1100:1100)"
+else
+  info "User 'firecracker' already exists."
+fi
+
+$SUDO mkdir -p /srv/jailer
+info "Jailer chroot base: /srv/jailer"
+
+# ---------------------------------------------------------------------------
+# 2. Install Firecracker binary
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -107,7 +126,7 @@ done
 info "Firecracker ${LATEST_TAG} installed."
 
 # ---------------------------------------------------------------------------
-# 2. Download kernel and rootfs from Firecracker CI
+# 3. Download kernel and rootfs from Firecracker CI
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -149,7 +168,7 @@ curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${LATEST_UBUNTU_KEY}" \
   || error "Failed to download Ubuntu rootfs."
 
 # ---------------------------------------------------------------------------
-# 3. Prepare rootfs (unsquash, patch SSH key, create ext4)
+# 4. Prepare rootfs (unsquash, patch SSH key, create ext4)
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -183,7 +202,7 @@ truncate -s 1G "${WORK_DIR}/${ROOTFS_NAME}"
 $SUDO mkfs.ext4 -d "${WORK_DIR}/squashfs-root" -F "${WORK_DIR}/${ROOTFS_NAME}" >/dev/null 2>&1
 
 # ---------------------------------------------------------------------------
-# 4. Install assets to /opt/firecracker/
+# 5. Install assets to /opt/firecracker/
 # ---------------------------------------------------------------------------
 
 echo ""

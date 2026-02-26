@@ -5,23 +5,29 @@ use tracing::{info, warn};
 
 const MIN_FIRECRACKER_VERSION: &str = "1.14.1";
 
-/// Runs all pre-flight checks for Firecracker availability.
+/// UID/GID for the jailed Firecracker process.
+pub const JAILER_UID: usize = 1100;
+pub const JAILER_GID: usize = 1100;
+
+/// Configuration determined at startup for the jailer.
+#[derive(Debug, Clone)]
+pub struct JailerConfig {
+    /// Detected cgroup version (1 or 2).
+    pub cgroup_version: usize,
+}
+
+/// Runs all pre-flight checks for Firecracker and jailer availability.
 ///
-/// This function checks:
-/// - If running in development mode (skips checks if so)
-/// - Firecracker binary availability and version
-/// - KVM device availability (Linux only)
+/// Returns a `JailerConfig` containing runtime-detected settings (e.g. cgroup
+/// version). In dev mode, returns a default config and skips all checks.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - Firecracker binary is not found
-/// - Firecracker version is below minimum required
-/// - KVM device is not available (Linux only)
-pub fn preflight_check() -> Result<()> {
+/// Returns an error if any required component is missing or misconfigured.
+pub fn preflight_check() -> Result<JailerConfig> {
     if is_dev_mode() {
         warn!("Running in development mode - skipping Firecracker checks");
-        return Ok(());
+        return Ok(JailerConfig { cgroup_version: 2 });
     }
 
     info!("Running Firecracker pre-flight checks...");
@@ -31,11 +37,24 @@ pub fn preflight_check() -> Result<()> {
     let version = parse_and_validate_version(&version_output)?;
     info!("Found Firecracker: v{}", version);
 
+    // Check jailer binary
+    check_jailer_binary()?;
+
     // Check KVM availability (Linux only)
     check_kvm_available()?;
 
+    // Verify the firecracker system user exists
+    check_jailer_user()?;
+
+    // Verify assets and jailer chroot are on the same filesystem
+    check_jailer_filesystem()?;
+
+    // Detect cgroup version
+    let cgroup_version = detect_cgroup_version();
+    info!("Detected cgroup version: v{}", cgroup_version);
+
     info!("Firecracker pre-flight checks passed");
-    Ok(())
+    Ok(JailerConfig { cgroup_version })
 }
 
 /// Checks if running in development mode.
@@ -172,6 +191,127 @@ fn check_kvm_available() -> Result<()> {
 fn check_kvm_available() -> Result<()> {
     // KVM is Linux-specific, so we skip this check on other platforms
     Ok(())
+}
+
+/// Checks that the jailer binary exists and is executable.
+fn check_jailer_binary() -> Result<()> {
+    let jailer_bin = std::env::var("JAILER_BIN").unwrap_or_else(|_| "jailer".to_string());
+
+    let output = Command::new(&jailer_bin)
+        .arg("--version")
+        .output()
+        .with_context(|| {
+            format!(
+                "Failed to execute jailer binary at '{}'. \
+                 The jailer is included in Firecracker releases. \
+                 Set `JAILER_BIN` environment variable if it is installed elsewhere.",
+                jailer_bin
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Jailer execution failed: {}", stderr);
+    }
+
+    info!("Jailer binary available");
+    Ok(())
+}
+
+/// Verifies that the `firecracker` system user (uid 1100) exists.
+#[cfg(target_os = "linux")]
+fn check_jailer_user() -> Result<()> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open("/etc/passwd").context("Failed to read /etc/passwd")?;
+    let reader = std::io::BufReader::new(file);
+
+    let uid_str = JAILER_UID.to_string();
+    for line in reader.lines() {
+        let line = line?;
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 3 && fields[2] == uid_str {
+            info!("Jailer user found: {} (uid {})", fields[0], JAILER_UID);
+            return Ok(());
+        }
+    }
+
+    bail!(
+        "No user with uid {} found. Run the install-firecracker.sh script to create \
+         the 'firecracker' system user.",
+        JAILER_UID,
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_jailer_user() -> Result<()> {
+    Ok(())
+}
+
+/// Verifies that /opt/firecracker and /srv/jailer are on the same filesystem
+/// (required for hard-linking assets into the jailer chroot).
+#[cfg(target_os = "linux")]
+fn check_jailer_filesystem() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+
+    let assets_dir = Path::new("/opt/firecracker");
+    let jailer_dir = Path::new("/srv/jailer");
+
+    if !assets_dir.exists() {
+        bail!(
+            "/opt/firecracker does not exist. Run install-firecracker.sh to install \
+             Firecracker assets."
+        );
+    }
+
+    if !jailer_dir.exists() {
+        bail!(
+            "/srv/jailer does not exist. Run install-firecracker.sh to create the \
+             jailer chroot base directory."
+        );
+    }
+
+    let assets_dev = std::fs::metadata(assets_dir)
+        .context("Failed to stat /opt/firecracker")?
+        .dev();
+    let jailer_dev = std::fs::metadata(jailer_dir)
+        .context("Failed to stat /srv/jailer")?
+        .dev();
+
+    if assets_dev != jailer_dev {
+        bail!(
+            "/opt/firecracker and /srv/jailer are on different filesystems. \
+             The jailer uses hard links, which cannot cross filesystem boundaries. \
+             Move assets to the same filesystem as /srv/jailer."
+        );
+    }
+
+    info!("Filesystem check passed (assets and jailer chroot on same device)");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_jailer_filesystem() -> Result<()> {
+    Ok(())
+}
+
+/// Detects whether the host uses cgroup v1 or v2.
+///
+/// Checks for the cgroup2 unified hierarchy at `/sys/fs/cgroup/cgroup.controllers`.
+/// Falls back to v1 if not found.
+#[cfg(target_os = "linux")]
+fn detect_cgroup_version() -> usize {
+    if std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_cgroup_version() -> usize {
+    2 // Default for non-Linux (dev mode)
 }
 
 #[cfg(test)]

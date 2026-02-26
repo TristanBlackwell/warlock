@@ -21,11 +21,12 @@ pub async fn get_server_addr() -> SocketAddr {
         std::env::set_var("WARLOCK_DEV", "true");
     }
 
-    // Run preflight checks (will be skipped in dev mode)
-    firecracker::preflight_check().expect("Firecracker preflight check failed");
+    // Run preflight checks (will be skipped in dev mode, returns default config)
+    let jailer_config =
+        firecracker::preflight_check().expect("Firecracker preflight check failed");
 
     let host_capacity = capacity::available_capacity().expect("Failed to get capacity");
-    let (app, _state) = app::create_app(host_capacity);
+    let (app, _state) = app::create_app(host_capacity, jailer_config);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 

@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tower_http::{catch_panic::CatchPanicLayer, trace::TraceLayer};
 use uuid::Uuid;
 
-use crate::{capacity::Capacity, handlers};
+use crate::{capacity::Capacity, firecracker::JailerConfig, handlers};
 
 /// A running VM and the resources allocated to it.
 pub struct VmEntry {
@@ -20,12 +20,14 @@ pub struct VmEntry {
 
 pub struct AppState {
     pub capacity: Capacity,
+    pub jailer: JailerConfig,
     pub vms: Mutex<HashMap<Uuid, VmEntry>>,
 }
 
-pub fn create_app(capacity: Capacity) -> (Router, Arc<AppState>) {
+pub fn create_app(capacity: Capacity, jailer: JailerConfig) -> (Router, Arc<AppState>) {
     let state = Arc::new(AppState {
         capacity,
+        jailer,
         vms: Mutex::new(HashMap::new()),
     });
 

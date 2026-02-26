@@ -14,7 +14,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting warlock v{}...", env!("CARGO_PKG_VERSION"));
 
-    firecracker::preflight_check().context("Firecracker pre-flight check failed")?;
+    let jailer_config =
+        firecracker::preflight_check().context("Firecracker pre-flight check failed")?;
 
     let host_capacity = capacity::available_capacity()
         .context("Failed to read host capacity during initialisation")?;
@@ -24,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         host_capacity.memory_mb, host_capacity.vcpus
     );
 
-    let (app, state) = app::create_app(host_capacity);
+    let (app, state) = app::create_app(host_capacity, jailer_config);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
@@ -48,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = entry.instance.stop().await {
                 error!(vm_id = %id, error = ?e, "Graceful stop failed, force-terminating");
             }
-            // Entry (and its Instance) is dropped here — SIGTERM + socket cleanup via FStack
+            // Entry is dropped here — SIGTERM + socket + jailer workspace cleanup via FStack
             drop(entry);
             info!(vm_id = %id, "VM terminated");
         }

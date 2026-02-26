@@ -7,14 +7,16 @@ use axum::{
 };
 use firecracker_rs_sdk::{
     firecracker::FirecrackerOption,
+    jailer::{ChrootStrategy, JailerOption},
     models::{BootSource, Drive, InstanceInfo, InstanceState, MachineConfiguration},
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::app::{AppState, VmEntry};
 use crate::error::ApiError;
+use crate::firecracker::{JAILER_GID, JAILER_UID};
 
 const DEFAULT_VCPUS: u8 = 1;
 const DEFAULT_MEMORY_MB: u32 = 128;
@@ -62,6 +64,30 @@ fn validate_vm_config(req: &Option<CreateVmRequest>) -> Result<(u8, u32), ApiErr
     Ok((vcpus, memory_mb))
 }
 
+/// Builds the cgroup configuration for a jailed VM based on the detected
+/// cgroup version and requested resources.
+fn build_cgroup_config(cgroup_version: usize, vcpus: u8, memory_mb: u32) -> Vec<(String, String)> {
+    // Memory limit: VM allocation + 50 MB overhead for the Firecracker process
+    let memory_limit_bytes = ((memory_mb as u64) + 50) * 1024 * 1024;
+    // CPU quota: 100% of one physical core per vCPU (100_000 us per 100_000 us period)
+    let cpu_quota = (vcpus as u64) * 100_000;
+
+    match cgroup_version {
+        2 => vec![
+            ("cpu.max".into(), format!("{} 100000", cpu_quota)),
+            ("memory.max".into(), memory_limit_bytes.to_string()),
+        ],
+        _ => vec![
+            ("cpu.cfs_quota_us".into(), cpu_quota.to_string()),
+            ("cpu.cfs_period_us".into(), "100000".into()),
+            (
+                "memory.limit_in_bytes".into(),
+                memory_limit_bytes.to_string(),
+            ),
+        ],
+    }
+}
+
 pub async fn create(
     State(state): State<Arc<AppState>>,
     body: Option<Json<CreateVmRequest>>,
@@ -69,23 +95,16 @@ pub async fn create(
     let req = body.map(|Json(r)| r);
     let (vcpus, memory_mb) = validate_vm_config(&req)?;
 
-    let firecracker =
+    let firecracker_bin =
         std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".to_string());
+    let jailer_bin = std::env::var("JAILER_BIN").unwrap_or_else(|_| "jailer".to_string());
 
     let vm_id = Uuid::new_v4();
-    let socket_path = format!("/tmp/warlock-{}.socket", vm_id);
-    let log_path = format!("/tmp/warlock-{}.log", vm_id);
 
-    // Clean up any stale socket file from a previous run
-    if std::path::Path::new(&socket_path).exists() {
-        warn!(vm_id = %vm_id, "Removing stale socket file at {}", socket_path);
-        let _ = std::fs::remove_file(&socket_path);
-    }
-
-    // Path to the kernel image
+    // Path to the kernel image (on the host — the SDK hard-links it into the chroot)
     const KERNEL: &str = "/opt/firecracker/vmlinux";
 
-    // Path to the rootfs
+    // Path to the rootfs (on the host — the SDK hard-links it into the chroot)
     const ROOTFS: &str = "/opt/firecracker/rootfs.ext4";
 
     // Lock the VM map for the entire create operation to prevent race conditions
@@ -118,20 +137,35 @@ pub async fn create(
 
     info!(vm_id = %vm_id, vcpus, memory_mb, "Creating VM instance");
 
-    // Build an instance with desired options
-    let mut instance = FirecrackerOption::new(firecracker)
-        .api_sock(&socket_path)
-        .id(vm_id.to_string())
-        .log_path(Some(&log_path))
-        .level("Info")
-        .build()?;
+    // Configure Firecracker options (passed through to firecracker via jailer's --)
+    let mut fc_opts = FirecrackerOption::new(&firecracker_bin);
+    fc_opts.log_path(Some("firecracker.log")).level("Info");
 
-    debug!(vm_id = %vm_id, "Firecracker socket instance created");
+    // Build cgroup configuration for resource isolation
+    let cgroups = build_cgroup_config(state.jailer.cgroup_version, vcpus, memory_mb);
 
-    // Start the firecracker process
+    // Build a jailed instance
+    let mut instance = JailerOption::new(
+        &jailer_bin,
+        &firecracker_bin,
+        vm_id.to_string(),
+        JAILER_GID,
+        JAILER_UID,
+    )
+    .firecracker_option(Some(&fc_opts))
+    .chroot_strategy(ChrootStrategy::NaiveLinkStrategy)
+    .new_pid_ns(Some(true))
+    .cgroup_version(Some(state.jailer.cgroup_version))
+    .cgroup(cgroups)
+    .remove_jailer_workspace_dir()
+    .build()?;
+
+    debug!(vm_id = %vm_id, "Jailed Firecracker instance created");
+
+    // Start the jailer process (which spawns firecracker inside the chroot)
     instance.start_vmm().await?;
 
-    debug!(vm_id = %vm_id, "Firecracker VMM started");
+    debug!(vm_id = %vm_id, "Jailed Firecracker VMM started");
 
     instance
         .put_machine_configuration(&MachineConfiguration {
@@ -146,7 +180,8 @@ pub async fn create(
 
     debug!(vm_id = %vm_id, "Machine configuration applied");
 
-    // Guest Boot Source
+    // Guest Boot Source — the SDK hard-links the kernel into the chroot and
+    // rewrites the path for Firecracker automatically.
     instance
         .put_guest_boot_source(&BootSource {
             boot_args: Some("console=ttyS0 reboot=k panic=1 pci=off".into()),
@@ -157,7 +192,7 @@ pub async fn create(
 
     debug!(vm_id = %vm_id, "Boot source added");
 
-    // Guest Drives
+    // Guest Drives — same automatic linking as the boot source.
     instance
         .put_guest_drive_by_id(&Drive {
             drive_id: "rootfs".into(),
@@ -236,7 +271,8 @@ pub async fn delete(
         error!(vm_id = %id, error = ?e, "Graceful stop failed, instance will be force-terminated on drop");
     }
 
-    // Instance is dropped here — the SDK's FStack sends SIGTERM and cleans up the socket file
+    // Entry is dropped here — the SDK's FStack sends SIGTERM to the Firecracker
+    // process and cleans up the socket file and jailer workspace directory.
     drop(entry);
 
     info!(vm_id = %id, "VM instance terminated and cleaned up");
@@ -328,5 +364,46 @@ mod tests {
     fn rejects_memory_below_minimum() {
         let err = validate_vm_config(&req(None, Some(64))).unwrap_err();
         assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ── Cgroup configuration ──
+
+    #[test]
+    fn cgroup_v2_config() {
+        let cgroups = build_cgroup_config(2, 1, 128);
+        assert_eq!(cgroups.len(), 2);
+        // 1 vCPU = 100_000 us quota per 100_000 us period
+        assert_eq!(cgroups[0], ("cpu.max".into(), "100000 100000".into()));
+        // 128 MB + 50 MB overhead = 178 MB in bytes
+        let expected_mem = ((128u64 + 50) * 1024 * 1024).to_string();
+        assert_eq!(cgroups[1], ("memory.max".into(), expected_mem));
+    }
+
+    #[test]
+    fn cgroup_v2_config_multi_vcpu() {
+        let cgroups = build_cgroup_config(2, 4, 256);
+        // 4 vCPUs = 400_000 us quota
+        assert_eq!(cgroups[0], ("cpu.max".into(), "400000 100000".into()));
+        let expected_mem = ((256u64 + 50) * 1024 * 1024).to_string();
+        assert_eq!(cgroups[1], ("memory.max".into(), expected_mem));
+    }
+
+    #[test]
+    fn cgroup_v1_config() {
+        let cgroups = build_cgroup_config(1, 2, 256);
+        assert_eq!(cgroups.len(), 3);
+        assert_eq!(
+            cgroups[0],
+            ("cpu.cfs_quota_us".into(), "200000".into())
+        );
+        assert_eq!(
+            cgroups[1],
+            ("cpu.cfs_period_us".into(), "100000".into())
+        );
+        let expected_mem = ((256u64 + 50) * 1024 * 1024).to_string();
+        assert_eq!(
+            cgroups[2],
+            ("memory.limit_in_bytes".into(), expected_mem)
+        );
     }
 }
