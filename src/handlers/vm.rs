@@ -97,11 +97,12 @@ pub async fn create(
 
     let vm_id = Uuid::new_v4();
 
-    // Path to the kernel image (on the host — the SDK hard-links it into the chroot)
-    const KERNEL: &str = "/opt/firecracker/vmlinux";
-
-    // Path to the rootfs (on the host — the SDK hard-links it into the chroot)
-    const ROOTFS: &str = "/opt/firecracker/rootfs.ext4";
+    // Resolve symlinks so the SDK hard-links the real files into the chroot
+    // (symlink targets are outside the chroot and won't be visible to Firecracker).
+    let kernel = std::fs::canonicalize("/opt/firecracker/vmlinux")
+        .map_err(|e| ApiError::internal(format!("Failed to resolve kernel path: {}", e)))?;
+    let rootfs = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
+        .map_err(|e| ApiError::internal(format!("Failed to resolve rootfs path: {}", e)))?;
 
     // Lock the VM map for the entire create operation to prevent race conditions
     // on the capacity check.
@@ -186,21 +187,25 @@ pub async fn create(
         .put_guest_boot_source(&BootSource {
             boot_args: Some("console=ttyS0 reboot=k panic=1 pci=off".into()),
             initrd_path: None,
-            kernel_image_path: KERNEL.into(),
+            kernel_image_path: kernel.clone(),
         })
         .await?;
 
     debug!(vm_id = %vm_id, "Boot source added");
 
     // Guest Drives — same automatic linking as the boot source.
+    // The rootfs is read-only because the jailer hard-links the shared image
+    // into the chroot and the Firecracker process (uid 1100) doesn't have
+    // write permission on the original inode. A writable overlay can be added
+    // later for per-VM state.
     instance
         .put_guest_drive_by_id(&Drive {
             drive_id: "rootfs".into(),
             partuuid: None,
             is_root_device: true,
             cache_type: None,
-            is_read_only: false,
-            path_on_host: ROOTFS.into(),
+            is_read_only: true,
+            path_on_host: rootfs.clone(),
             rate_limiter: None,
             io_engine: None,
             socket: None,
