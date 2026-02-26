@@ -44,12 +44,12 @@ async fn main() -> anyhow::Result<()> {
     if vm_count > 0 {
         info!("Shutting down {} running VM(s)...", vm_count);
 
-        for (id, mut instance) in vms.drain() {
-            if let Err(e) = instance.stop().await {
+        for (id, mut entry) in vms.drain() {
+            if let Err(e) = entry.instance.stop().await {
                 error!(vm_id = %id, error = ?e, "Graceful stop failed, force-terminating");
             }
-            // Instance is dropped here — SIGTERM + socket cleanup via FStack
-            drop(instance);
+            // Entry (and its Instance) is dropped here — SIGTERM + socket cleanup via FStack
+            drop(entry);
             info!(vm_id = %id, "VM terminated");
         }
     }

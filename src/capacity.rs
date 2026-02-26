@@ -1,11 +1,21 @@
 use sysinfo::System;
 
+/// Memory in MB reserved for the host OS and Warlock itself.
+const HOST_RESERVED_MEMORY_MB: u64 = 256;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Capacity {
     /// Total system memory in megabytes.
     pub memory_mb: u64,
     /// Total number of CPU cores.
     pub vcpus: u8,
+}
+
+impl Capacity {
+    /// Memory available for VM allocation after the host reservation.
+    pub fn allocatable_memory_mb(&self) -> u64 {
+        self.memory_mb.saturating_sub(HOST_RESERVED_MEMORY_MB)
+    }
 }
 
 /// Returns the total system memory in megabytes.

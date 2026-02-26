@@ -1,8 +1,9 @@
 use axum::{http::StatusCode, response::IntoResponse, Json};
 
+#[derive(Debug)]
 pub struct ApiError {
-    status: StatusCode,
-    message: String,
+    pub(crate) status: StatusCode,
+    pub(crate) message: String,
 }
 
 impl ApiError {
@@ -22,6 +23,16 @@ impl ApiError {
     /// Convenience constructor for 404 Not Found.
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, message)
+    }
+
+    /// Convenience constructor for 409 Conflict.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, message)
+    }
+
+    /// Convenience constructor for 422 Unprocessable Entity.
+    pub fn unprocessable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, message)
     }
 }
 

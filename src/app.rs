@@ -11,9 +11,16 @@ use uuid::Uuid;
 
 use crate::{capacity::Capacity, handlers};
 
+/// A running VM and the resources allocated to it.
+pub struct VmEntry {
+    pub instance: Instance,
+    pub vcpus: u8,
+    pub memory_mb: u32,
+}
+
 pub struct AppState {
     pub capacity: Capacity,
-    pub vms: Mutex<HashMap<Uuid, Instance>>,
+    pub vms: Mutex<HashMap<Uuid, VmEntry>>,
 }
 
 pub fn create_app(capacity: Capacity) -> (Router, Arc<AppState>) {
