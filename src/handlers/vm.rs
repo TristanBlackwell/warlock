@@ -95,10 +95,6 @@ pub async fn create(
     let req = body.map(|Json(r)| r);
     let (vcpus, memory_mb) = validate_vm_config(&req)?;
 
-    let firecracker_bin =
-        std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".to_string());
-    let jailer_bin = std::env::var("JAILER_BIN").unwrap_or_else(|_| "jailer".to_string());
-
     let vm_id = Uuid::new_v4();
 
     // Path to the kernel image (on the host — the SDK hard-links it into the chroot)
@@ -138,16 +134,19 @@ pub async fn create(
     info!(vm_id = %vm_id, vcpus, memory_mb, "Creating VM instance");
 
     // Configure Firecracker options (passed through to firecracker via jailer's --)
-    let mut fc_opts = FirecrackerOption::new(&firecracker_bin);
+    let mut fc_opts = FirecrackerOption::new(&state.jailer.firecracker_path);
     fc_opts.log_path(Some("firecracker.log")).level("Info");
 
     // Build cgroup configuration for resource isolation
     let cgroups = build_cgroup_config(state.jailer.cgroup_version, vcpus, memory_mb);
 
+    // Route jailer stderr to a per-VM log file so errors aren't silently swallowed
+    let jailer_stderr = format!("/tmp/warlock-jailer-{}.log", vm_id);
+
     // Build a jailed instance
     let mut instance = JailerOption::new(
-        &jailer_bin,
-        &firecracker_bin,
+        &state.jailer.jailer_path,
+        &state.jailer.firecracker_path,
         vm_id.to_string(),
         JAILER_GID,
         JAILER_UID,
@@ -157,6 +156,7 @@ pub async fn create(
     .new_pid_ns(Some(true))
     .cgroup_version(Some(state.jailer.cgroup_version))
     .cgroup(cgroups)
+    .stderr(&jailer_stderr)
     .remove_jailer_workspace_dir()
     .build()?;
 

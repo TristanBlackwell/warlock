@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use semver::Version;
+use std::path::PathBuf;
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -14,6 +15,10 @@ pub const JAILER_GID: usize = 1100;
 pub struct JailerConfig {
     /// Detected cgroup version (1 or 2).
     pub cgroup_version: usize,
+    /// Absolute path to the Firecracker binary.
+    pub firecracker_path: PathBuf,
+    /// Absolute path to the jailer binary.
+    pub jailer_path: PathBuf,
 }
 
 /// Runs all pre-flight checks for Firecracker and jailer availability.
@@ -27,18 +32,26 @@ pub struct JailerConfig {
 pub fn preflight_check() -> Result<JailerConfig> {
     if is_dev_mode() {
         warn!("Running in development mode - skipping Firecracker checks");
-        return Ok(JailerConfig { cgroup_version: 2 });
+        return Ok(JailerConfig {
+            cgroup_version: 2,
+            firecracker_path: PathBuf::from("firecracker"),
+            jailer_path: PathBuf::from("jailer"),
+        });
     }
 
     info!("Running Firecracker pre-flight checks...");
 
-    // Check Firecracker binary and version
-    let version_output = check_firecracker_binary()?;
+    // Check Firecracker binary and version, resolve absolute path
+    let (version_output, firecracker_path) = check_firecracker_binary()?;
     let version = parse_and_validate_version(&version_output)?;
-    info!("Found Firecracker: v{}", version);
+    info!(
+        "Found Firecracker: v{} at {}",
+        version,
+        firecracker_path.display()
+    );
 
-    // Check jailer binary
-    check_jailer_binary()?;
+    // Check jailer binary, resolve absolute path
+    let jailer_path = check_jailer_binary()?;
 
     // Check KVM availability (Linux only)
     check_kvm_available()?;
@@ -54,7 +67,11 @@ pub fn preflight_check() -> Result<JailerConfig> {
     info!("Detected cgroup version: v{}", cgroup_version);
 
     info!("Firecracker pre-flight checks passed");
-    Ok(JailerConfig { cgroup_version })
+    Ok(JailerConfig {
+        cgroup_version,
+        firecracker_path,
+        jailer_path,
+    })
 }
 
 /// Checks if running in development mode.
@@ -71,7 +88,32 @@ fn is_dev_mode() -> bool {
             .unwrap_or(false)
 }
 
-/// Checks for Firecracker binary and returns its version output.
+/// Resolves a binary name to its absolute path.
+///
+/// Checks the given environment variable for an explicit path first, then
+/// falls back to searching PATH via `which`. Returns the canonical absolute
+/// path to the binary.
+fn resolve_binary_path(env_var: &str, default_name: &str) -> Result<PathBuf> {
+    let name = std::env::var(env_var).unwrap_or_else(|_| default_name.to_string());
+    let path = PathBuf::from(&name);
+
+    // If the user gave us an absolute path, trust it
+    if path.is_absolute() {
+        return Ok(path);
+    }
+
+    // Otherwise resolve via PATH
+    which::which(&name).with_context(|| {
+        format!(
+            "Could not find '{}' in PATH. \
+             Set `{}` environment variable to the absolute path.",
+            name, env_var
+        )
+    })
+}
+
+/// Checks for Firecracker binary and returns its version output and resolved
+/// absolute path.
 ///
 /// First checks `FIRECRACKER_BIN` environment variable for a custom path,
 /// otherwise falls back to "firecracker" in PATH.
@@ -81,11 +123,10 @@ fn is_dev_mode() -> bool {
 /// Returns an error if:
 /// - The binary cannot be found or executed
 /// - The version command fails
-fn check_firecracker_binary() -> Result<String> {
-    let firecracker_bin =
-        std::env::var("FIRECRACKER_BIN").unwrap_or_else(|_| "firecracker".to_string());
+fn check_firecracker_binary() -> Result<(String, PathBuf)> {
+    let firecracker_path = resolve_binary_path("FIRECRACKER_BIN", "firecracker")?;
 
-    let output = Command::new(&firecracker_bin)
+    let output = Command::new(&firecracker_path)
         .arg("--version")
         .output()
         .with_context(|| {
@@ -93,7 +134,7 @@ fn check_firecracker_binary() -> Result<String> {
                 "Failed to execute Firecracker binary at '{}'. \
                  Install Firecracker from https://github.com/firecracker-microvm/firecracker \
                  or set `FIRECRACKER_BIN` environment variable to the correct path.",
-                firecracker_bin
+                firecracker_path.display()
             )
         })?;
 
@@ -108,7 +149,7 @@ fn check_firecracker_binary() -> Result<String> {
         bail!("Firecracker version output was empty");
     }
 
-    Ok(version_output)
+    Ok((version_output, firecracker_path))
 }
 
 /// Parses Firecracker version output and validates it meets minimum requirements.
@@ -193,11 +234,12 @@ fn check_kvm_available() -> Result<()> {
     Ok(())
 }
 
-/// Checks that the jailer binary exists and is executable.
-fn check_jailer_binary() -> Result<()> {
-    let jailer_bin = std::env::var("JAILER_BIN").unwrap_or_else(|_| "jailer".to_string());
+/// Checks that the jailer binary exists and is executable. Returns the
+/// resolved absolute path.
+fn check_jailer_binary() -> Result<PathBuf> {
+    let jailer_path = resolve_binary_path("JAILER_BIN", "jailer")?;
 
-    let output = Command::new(&jailer_bin)
+    let output = Command::new(&jailer_path)
         .arg("--version")
         .output()
         .with_context(|| {
@@ -205,7 +247,7 @@ fn check_jailer_binary() -> Result<()> {
                 "Failed to execute jailer binary at '{}'. \
                  The jailer is included in Firecracker releases. \
                  Set `JAILER_BIN` environment variable if it is installed elsewhere.",
-                jailer_bin
+                jailer_path.display()
             )
         })?;
 
@@ -214,8 +256,8 @@ fn check_jailer_binary() -> Result<()> {
         bail!("Jailer execution failed: {}", stderr);
     }
 
-    info!("Jailer binary available");
-    Ok(())
+    info!("Jailer binary available at {}", jailer_path.display());
+    Ok(jailer_path)
 }
 
 /// Verifies that the `firecracker` system user (uid 1100) exists.
