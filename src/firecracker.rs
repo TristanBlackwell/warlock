@@ -10,6 +10,15 @@ const MIN_FIRECRACKER_VERSION: &str = "1.14.1";
 pub const JAILER_UID: usize = 1100;
 pub const JAILER_GID: usize = 1100;
 
+/// Strategy for creating per-VM rootfs copies, detected at startup.
+#[derive(Debug, Clone)]
+pub enum CopyStrategy {
+    /// Filesystem supports reflinks (btrfs, XFS). Instant copy-on-write.
+    Reflink,
+    /// Fallback: sparse copy. Reads source but skips zero blocks.
+    Sparse,
+}
+
 /// Configuration determined at startup for the jailer.
 #[derive(Debug, Clone)]
 pub struct JailerConfig {
@@ -19,6 +28,8 @@ pub struct JailerConfig {
     pub firecracker_path: PathBuf,
     /// Absolute path to the jailer binary.
     pub jailer_path: PathBuf,
+    /// Detected strategy for copying rootfs images per VM.
+    pub copy_strategy: CopyStrategy,
 }
 
 /// Runs all pre-flight checks for Firecracker and jailer availability.
@@ -36,6 +47,7 @@ pub fn preflight_check() -> Result<JailerConfig> {
             cgroup_version: 2,
             firecracker_path: PathBuf::from("firecracker"),
             jailer_path: PathBuf::from("jailer"),
+            copy_strategy: CopyStrategy::Sparse,
         });
     }
 
@@ -62,15 +74,26 @@ pub fn preflight_check() -> Result<JailerConfig> {
     // Verify assets and jailer chroot are on the same filesystem
     check_jailer_filesystem()?;
 
+    // Check vm-images directory exists
+    check_vm_images_dir()?;
+
     // Detect cgroup version
     let cgroup_version = detect_cgroup_version();
     info!("Detected cgroup version: v{}", cgroup_version);
+
+    // Detect best rootfs copy strategy for the filesystem
+    let copy_strategy = detect_copy_strategy();
+    match copy_strategy {
+        CopyStrategy::Reflink => info!("Rootfs copy strategy: reflink (instant CoW)"),
+        CopyStrategy::Sparse => info!("Rootfs copy strategy: sparse copy (no reflink support)"),
+    }
 
     info!("Firecracker pre-flight checks passed");
     Ok(JailerConfig {
         cgroup_version,
         firecracker_path,
         jailer_path,
+        copy_strategy,
     })
 }
 
@@ -336,6 +359,73 @@ fn check_jailer_filesystem() -> Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn check_jailer_filesystem() -> Result<()> {
     Ok(())
+}
+
+/// Directory for per-VM rootfs copies.
+pub const VM_IMAGES_DIR: &str = "/srv/jailer/vm-images";
+
+/// Verifies that the vm-images directory exists.
+#[cfg(target_os = "linux")]
+fn check_vm_images_dir() -> Result<()> {
+    use std::path::Path;
+
+    let dir = Path::new(VM_IMAGES_DIR);
+    if !dir.exists() {
+        bail!(
+            "{} does not exist. Run install-firecracker.sh to create it.",
+            VM_IMAGES_DIR
+        );
+    }
+
+    info!("VM images directory: {}", VM_IMAGES_DIR);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_vm_images_dir() -> Result<()> {
+    Ok(())
+}
+
+/// Detects whether the filesystem at `/srv/jailer` supports reflink copies.
+///
+/// Creates a small probe file and attempts `cp --reflink=always`. If it
+/// succeeds, the filesystem supports copy-on-write (btrfs, XFS with reflinks).
+/// Falls back to sparse copies otherwise.
+#[cfg(target_os = "linux")]
+fn detect_copy_strategy() -> CopyStrategy {
+    use std::path::Path;
+
+    let probe_src = Path::new(VM_IMAGES_DIR).join(".warlock-probe");
+    let probe_dst = Path::new(VM_IMAGES_DIR).join(".warlock-probe.reflink");
+
+    // Clean up any stale probe files
+    let _ = std::fs::remove_file(&probe_src);
+    let _ = std::fs::remove_file(&probe_dst);
+
+    // Create a small probe file
+    if std::fs::write(&probe_src, b"probe").is_err() {
+        return CopyStrategy::Sparse;
+    }
+
+    let result = Command::new("cp")
+        .arg("--reflink=always")
+        .arg(&probe_src)
+        .arg(&probe_dst)
+        .output();
+
+    // Clean up
+    let _ = std::fs::remove_file(&probe_src);
+    let _ = std::fs::remove_file(&probe_dst);
+
+    match result {
+        Ok(output) if output.status.success() => CopyStrategy::Reflink,
+        _ => CopyStrategy::Sparse,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_copy_strategy() -> CopyStrategy {
+    CopyStrategy::Sparse
 }
 
 /// Detects whether the host uses cgroup v1 or v2.

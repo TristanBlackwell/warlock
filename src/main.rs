@@ -49,8 +49,15 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = entry.instance.stop().await {
                 error!(vm_id = %id, error = ?e, "Graceful stop failed, force-terminating");
             }
+            let rootfs_copy = entry.rootfs_copy.clone();
             // Entry is dropped here — SIGTERM + socket + jailer workspace cleanup via FStack
             drop(entry);
+            // Clean up the per-VM rootfs copy (outside the jailer workspace)
+            if let Some(ref path) = rootfs_copy {
+                if let Err(e) = std::fs::remove_file(path) {
+                    error!(vm_id = %id, error = ?e, "Failed to remove rootfs copy");
+                }
+            }
             info!(vm_id = %id, "VM terminated");
         }
     }

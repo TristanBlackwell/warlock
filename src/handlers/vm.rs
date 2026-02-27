@@ -1,3 +1,5 @@
+use std::path::{Path as StdPath, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use axum::{
@@ -16,7 +18,7 @@ use uuid::Uuid;
 
 use crate::app::{AppState, VmEntry};
 use crate::error::ApiError;
-use crate::firecracker::{JAILER_GID, JAILER_UID};
+use crate::firecracker::{CopyStrategy, JAILER_GID, JAILER_UID, VM_IMAGES_DIR};
 
 const DEFAULT_VCPUS: u8 = 1;
 const DEFAULT_MEMORY_MB: u32 = 128;
@@ -88,6 +90,60 @@ fn build_cgroup_config(cgroup_version: usize, vcpus: u8, memory_mb: u32) -> Vec<
     }
 }
 
+/// Creates a per-VM copy of the rootfs image using the best available strategy.
+///
+/// On reflink-capable filesystems (btrfs, XFS) this is an instant CoW clone.
+/// Otherwise falls back to a sparse copy.
+fn copy_rootfs(
+    strategy: &CopyStrategy,
+    source: &StdPath,
+    dest: &StdPath,
+) -> Result<(), ApiError> {
+    let args: &[&str] = match strategy {
+        CopyStrategy::Reflink => &["--reflink=always"],
+        CopyStrategy::Sparse => &["--sparse=always"],
+    };
+
+    let output = Command::new("cp")
+        .args(args)
+        .arg(source)
+        .arg(dest)
+        .output()
+        .map_err(|e| ApiError::internal(format!("Failed to execute cp: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ApiError::internal(format!(
+            "Failed to copy rootfs: {}",
+            stderr.trim()
+        )));
+    }
+
+    // Set ownership so Firecracker (uid 1100) can read/write the copy
+    let output = Command::new("chown")
+        .arg(format!("{}:{}", JAILER_UID, JAILER_GID))
+        .arg(dest)
+        .output()
+        .map_err(|e| ApiError::internal(format!("Failed to execute chown: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ApiError::internal(format!(
+            "Failed to chown rootfs copy: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Removes a per-VM rootfs copy, logging any errors.
+fn cleanup_rootfs_copy(vm_id: &Uuid, path: &StdPath) {
+    if let Err(e) = std::fs::remove_file(path) {
+        error!(vm_id = %vm_id, path = %path.display(), error = ?e, "Failed to remove rootfs copy");
+    }
+}
+
 pub async fn create(
     State(state): State<Arc<AppState>>,
     body: Option<Json<CreateVmRequest>>,
@@ -101,8 +157,15 @@ pub async fn create(
     // (symlink targets are outside the chroot and won't be visible to Firecracker).
     let kernel = std::fs::canonicalize("/opt/firecracker/vmlinux")
         .map_err(|e| ApiError::internal(format!("Failed to resolve kernel path: {}", e)))?;
-    let rootfs = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
+    let base_rootfs = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
         .map_err(|e| ApiError::internal(format!("Failed to resolve rootfs path: {}", e)))?;
+
+    // Create a per-VM copy of the rootfs so each VM has its own writable disk.
+    // On reflink-capable filesystems this is instant; otherwise a sparse copy.
+    let vm_rootfs = PathBuf::from(VM_IMAGES_DIR).join(format!("{}.ext4", vm_id));
+    copy_rootfs(&state.jailer.copy_strategy, &base_rootfs, &vm_rootfs)?;
+
+    debug!(vm_id = %vm_id, "Rootfs copied to {}", vm_rootfs.display());
 
     // Lock the VM map for the entire create operation to prevent race conditions
     // on the capacity check.
@@ -193,19 +256,15 @@ pub async fn create(
 
     debug!(vm_id = %vm_id, "Boot source added");
 
-    // Guest Drives — same automatic linking as the boot source.
-    // The rootfs is read-only because the jailer hard-links the shared image
-    // into the chroot and the Firecracker process (uid 1100) doesn't have
-    // write permission on the original inode. A writable overlay can be added
-    // later for per-VM state.
+    // Guest Drives — each VM gets its own writable rootfs copy.
     instance
         .put_guest_drive_by_id(&Drive {
             drive_id: "rootfs".into(),
             partuuid: None,
             is_root_device: true,
             cache_type: None,
-            is_read_only: true,
-            path_on_host: rootfs.clone(),
+            is_read_only: false,
+            path_on_host: vm_rootfs.clone(),
             rate_limiter: None,
             io_engine: None,
             socket: None,
@@ -229,6 +288,7 @@ pub async fn create(
             instance,
             vcpus,
             memory_mb,
+            rootfs_copy: Some(vm_rootfs),
         },
     );
 
@@ -276,9 +336,17 @@ pub async fn delete(
         error!(vm_id = %id, error = ?e, "Graceful stop failed, instance will be force-terminated on drop");
     }
 
+    // Capture the rootfs copy path before dropping the entry
+    let rootfs_copy = entry.rootfs_copy.clone();
+
     // Entry is dropped here — the SDK's FStack sends SIGTERM to the Firecracker
     // process and cleans up the socket file and jailer workspace directory.
     drop(entry);
+
+    // Clean up the per-VM rootfs copy (outside the jailer workspace)
+    if let Some(ref path) = rootfs_copy {
+        cleanup_rootfs_copy(&id, path);
+    }
 
     info!(vm_id = %id, "VM instance terminated and cleaned up");
 

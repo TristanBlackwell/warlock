@@ -84,7 +84,9 @@ else
 fi
 
 $SUDO mkdir -p /srv/jailer
+$SUDO mkdir -p /srv/jailer/vm-images
 info "Jailer chroot base: /srv/jailer"
+info "VM images directory: /srv/jailer/vm-images"
 
 # ---------------------------------------------------------------------------
 # 2. Install Firecracker binary

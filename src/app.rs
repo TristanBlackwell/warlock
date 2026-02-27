@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::{
     routing::{delete, get, post},
@@ -16,6 +16,8 @@ pub struct VmEntry {
     pub instance: Instance,
     pub vcpus: u8,
     pub memory_mb: u32,
+    /// Path to the per-VM rootfs copy (cleaned up on delete/shutdown).
+    pub rootfs_copy: Option<PathBuf>,
 }
 
 pub struct AppState {
