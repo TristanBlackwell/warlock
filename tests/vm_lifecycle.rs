@@ -13,6 +13,7 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::process::Command;
 use std::sync::OnceLock;
 
 use reqwest::Client;
@@ -43,6 +44,16 @@ fn get_live_server_addr() -> SocketAddr {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             rt.block_on(async {
+                // Initialize tracing so server-side errors are visible in test output.
+                // try_init() is safe to call multiple times (ignores if already set).
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "warlock=debug".into()),
+                    )
+                    .with_test_writer()
+                    .try_init();
+
                 // Ensure WARLOCK_DEV is NOT set — we want real preflight checks
                 unsafe {
                     std::env::remove_var("WARLOCK_DEV");
@@ -100,7 +111,13 @@ async fn request(
         .expect("request failed");
 
     let status = response.status().as_u16();
-    let json = response.json().await.expect("failed to parse JSON");
+    let text = response.text().await.expect("failed to read response body");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        panic!(
+            "failed to parse JSON (status {}): {}\nbody: {:?}",
+            status, e, text
+        )
+    });
     (status, json)
 }
 
@@ -276,5 +293,134 @@ async fn healthcheck_reflects_allocated_resources() {
     assert!(
         hc_body["vms"]["allocated_memory_mb"].as_u64().unwrap() >= 128,
         "healthcheck should show allocated memory"
+    );
+}
+
+// ── Networking ──
+
+/// Verifies end-to-end VM networking: tap device creation, nftables rules,
+/// host-to-guest connectivity (ping), and full cleanup on deletion.
+#[tokio::test]
+async fn vm_networking() {
+    if !require_live() {
+        eprintln!("skipped (WARLOCK_LIVE not set)");
+        return;
+    }
+
+    let addr = get_live_server_addr();
+
+    // ── Create VM ──
+    let (create_status, create_body) = request(
+        "POST",
+        &format!("http://{}/vm", addr),
+        None, // defaults: 1 vCPU, 128 MB
+    )
+    .await;
+
+    assert_eq!(create_status, 202, "expected 202 Accepted for create");
+
+    let vm_id = create_body["id"].as_str().unwrap_or("").to_string();
+    let guest_ip = create_body["guest_ip"]
+        .as_str()
+        .expect("response should include guest_ip")
+        .to_string();
+
+    // The guest IP should be in the 172.16.0.0/16 range
+    assert!(
+        guest_ip.starts_with("172.16."),
+        "guest_ip should be in 172.16.0.0/16, got: {}",
+        guest_ip
+    );
+
+    // ── Verify tap device exists ──
+    // The first VM gets tap name "fc0" (subnet index 0).
+    // We can't know the exact tap name from the API response, but we can check
+    // that at least one fc* tap device exists.
+    let ip_link = Command::new("ip")
+        .args(["link", "show"])
+        .output()
+        .expect("failed to run ip link show");
+    let link_output = String::from_utf8_lossy(&ip_link.stdout);
+    let has_fc_tap = link_output.lines().any(|line| line.contains("fc"));
+    assert!(
+        has_fc_tap,
+        "expected at least one fc* tap device in ip link output:\n{}",
+        link_output
+    );
+
+    // ── Verify nftables rules exist for the guest IP ──
+    let nft_list = Command::new("nft")
+        .args(["list", "table", "firecracker"])
+        .output()
+        .expect("failed to run nft list table firecracker");
+    let nft_output = String::from_utf8_lossy(&nft_list.stdout);
+    assert!(
+        nft_output.contains(&guest_ip),
+        "nftables firecracker table should contain a rule for guest IP {}, got:\n{}",
+        guest_ip,
+        nft_output
+    );
+
+    // ── Ping guest from host ──
+    // Give the guest kernel a moment to configure networking. The kernel ip=
+    // boot arg is applied early, but the VM may still be initialising.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let ping = Command::new("ping")
+        .args(["-c", "3", "-W", "3", &guest_ip])
+        .output()
+        .expect("failed to run ping");
+    let ping_stdout = String::from_utf8_lossy(&ping.stdout);
+    let ping_stderr = String::from_utf8_lossy(&ping.stderr);
+    assert!(
+        ping.status.success(),
+        "ping to guest {} failed:\nstdout: {}\nstderr: {}",
+        guest_ip,
+        ping_stdout,
+        ping_stderr
+    );
+
+    // ── Delete VM ──
+    let (delete_status, _) =
+        request("DELETE", &format!("http://{}/vm/{}", addr, vm_id), None).await;
+    assert_eq!(delete_status, 200, "expected 200 for delete");
+
+    // ── Verify tap device cleaned up ──
+    let ip_link_after = Command::new("ip")
+        .args(["link", "show"])
+        .output()
+        .expect("failed to run ip link show");
+    let link_after = String::from_utf8_lossy(&ip_link_after.stdout);
+
+    // Check that no fc* tap devices remain (assuming this is the only VM).
+    // We check for the specific pattern to avoid false positives on interface
+    // names that happen to contain "fc".
+    let fc_taps_remaining: Vec<&str> = link_after
+        .lines()
+        .filter(|line| {
+            // ip link lines with interface names look like: "N: fc0: <FLAGS>"
+            line.split_whitespace()
+                .nth(1)
+                .map(|name| name.trim_end_matches(':').starts_with("fc"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(
+        fc_taps_remaining.is_empty(),
+        "expected no fc* tap devices after deletion, found:\n{}",
+        fc_taps_remaining.join("\n")
+    );
+
+    // ── Verify nftables rules cleaned up ──
+    let nft_after = Command::new("nft")
+        .args(["list", "table", "firecracker"])
+        .output()
+        .expect("failed to run nft list table firecracker");
+    let nft_after_output = String::from_utf8_lossy(&nft_after.stdout);
+    assert!(
+        !nft_after_output.contains(&guest_ip),
+        "nftables rules for guest IP {} should be removed after deletion, but found:\n{}",
+        guest_ip,
+        nft_after_output
     );
 }

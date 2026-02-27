@@ -108,23 +108,33 @@ pub async fn create(
 
     let vm_id = Uuid::new_v4();
 
-    // Resolve symlinks so the SDK hard-links the real files into the chroot
-    // (symlink targets are outside the chroot and won't be visible to Firecracker).
-    let kernel = std::fs::canonicalize("/opt/firecracker/vmlinux")
-        .context("Failed to resolve kernel path")?;
-    let base_rootfs = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
-        .context("Failed to resolve rootfs path")?;
-
-    // Create a per-VM copy of the rootfs so each VM has its own writable disk.
-    // On reflink-capable filesystems this is instant; otherwise a sparse copy.
+    // ── Blocking I/O: resolve paths + copy rootfs ──
+    // These operations shell out to `cp` and `chown` which can take seconds
+    // on a slow disk. Running them on the tokio runtime thread would block
+    // all other requests, so we offload to a blocking thread.
+    let copy_strategy = state.jailer.copy_strategy.clone();
     let vm_rootfs = PathBuf::from(VM_IMAGES_DIR).join(format!("{}.ext4", vm_id));
-    copy_rootfs(
-        &state.jailer.copy_strategy,
-        &base_rootfs,
-        &vm_rootfs,
-        JAILER_UID,
-        JAILER_GID,
-    )?;
+    let vm_rootfs_clone = vm_rootfs.clone();
+
+    let kernel = tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
+        let kernel = std::fs::canonicalize("/opt/firecracker/vmlinux")
+            .context("Failed to resolve kernel path")?;
+        let base_rootfs = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
+            .context("Failed to resolve rootfs path")?;
+
+        copy_rootfs(
+            &copy_strategy,
+            &base_rootfs,
+            &vm_rootfs_clone,
+            JAILER_UID,
+            JAILER_GID,
+        )?;
+
+        Ok(kernel)
+    })
+    .await
+    .context("Rootfs copy task panicked")?
+    .context("Failed to prepare rootfs")?;
 
     debug!(vm_id = %vm_id, "Rootfs copied to {}", vm_rootfs.display());
 
@@ -137,24 +147,36 @@ pub async fn create(
 
     debug!(vm_id = %vm_id, tap = %subnet.tap_name, guest_ip = %subnet.guest_ip, "Subnet allocated");
 
-    // ── Networking: create tap device ──
-    if let Err(e) = create_tap(&subnet.tap_name, &subnet.tap_ip) {
-        // Roll back subnet allocation
-        state.subnet_pool.lock().await.release(subnet.index);
-        return Err(ApiError::from(e));
-    }
+    // ── Networking: create tap + NAT rules ──
+    // These shell out to `ip` and `nft` — fast commands but still blocking I/O.
+    let tap_name = subnet.tap_name.clone();
+    let tap_ip = subnet.tap_ip;
+    let guest_ip_addr = subnet.guest_ip;
+    let host_iface = state.jailer.host_interface.clone();
 
-    // ── Networking: add NAT rules ──
-    let nat_handles =
-        match add_nat_rules(&subnet.guest_ip, &subnet.tap_name, &state.jailer.host_interface) {
-            Ok(handles) => handles,
+    let nat_result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        create_tap(&tap_name, &tap_ip)?;
+
+        match add_nat_rules(&guest_ip_addr, &tap_name, &host_iface) {
+            Ok(handles) => Ok(handles),
             Err(e) => {
-                // Roll back: delete tap + release subnet
-                delete_tap(&subnet.tap_name);
-                state.subnet_pool.lock().await.release(subnet.index);
-                return Err(ApiError::from(e));
+                // Roll back: delete tap
+                delete_tap(&tap_name);
+                Err(e)
             }
-        };
+        }
+    })
+    .await
+    .context("Networking setup task panicked")?;
+
+    let nat_handles = match nat_result {
+        Ok(handles) => handles,
+        Err(e) => {
+            // Roll back subnet allocation
+            state.subnet_pool.lock().await.release(subnet.index);
+            return Err(ApiError::from(e));
+        }
+    };
 
     // Lock the VM map for the entire create operation to prevent race conditions
     // on the capacity check.
