@@ -22,6 +22,9 @@ pub fn preflight_check() -> Result<JailerConfig> {
             cgroup_version: 2,
             firecracker_path: PathBuf::from("firecracker"),
             jailer_path: PathBuf::from("jailer"),
+            kernel_path: PathBuf::from("/dev/null/nonexistent-kernel"),
+            rootfs_path: PathBuf::from("/dev/null/nonexistent-rootfs"),
+            vm_images_dir: PathBuf::from("/dev/null/nonexistent-vm-images"),
             copy_strategy: CopyStrategy::Sparse,
             host_interface: "eth0".into(),
         });
@@ -73,11 +76,25 @@ pub fn preflight_check() -> Result<JailerConfig> {
     });
     info!("Host network interface: {}", host_interface);
 
+    // Resolve asset paths (canonicalize follows symlinks so the jailer can
+    // hard-link the real files into the chroot).
+    let kernel_path = std::fs::canonicalize("/opt/firecracker/vmlinux")
+        .context("Failed to resolve kernel path at /opt/firecracker/vmlinux")?;
+    let rootfs_path = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
+        .context("Failed to resolve rootfs path at /opt/firecracker/rootfs.ext4")?;
+    let vm_images_dir = PathBuf::from(super::VM_IMAGES_DIR);
+
+    info!("Kernel: {}", kernel_path.display());
+    info!("Base rootfs: {}", rootfs_path.display());
+
     info!("Firecracker pre-flight checks passed");
     Ok(JailerConfig {
         cgroup_version,
         firecracker_path,
         jailer_path,
+        kernel_path,
+        rootfs_path,
+        vm_images_dir,
         copy_strategy,
         host_interface,
     })

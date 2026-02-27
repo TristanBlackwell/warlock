@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::app::{AppState, VmEntry};
 use crate::error::ApiError;
 use crate::firecracker::network::{add_nat_rules, create_tap, delete_tap, remove_nat_rules};
-use crate::firecracker::{JAILER_GID, JAILER_UID, VM_IMAGES_DIR};
+use crate::firecracker::{JAILER_GID, JAILER_UID};
 use crate::vm::config::{build_cgroup_config, validate_vm_config};
 use crate::vm::network::build_network_boot_args;
 use crate::vm::rootfs::{cleanup_rootfs_copy, copy_rootfs};
@@ -108,29 +108,24 @@ pub async fn create(
 
     let vm_id = Uuid::new_v4();
 
-    // ── Blocking I/O: resolve paths + copy rootfs ──
-    // These operations shell out to `cp` and `chown` which can take seconds
+    // ── Blocking I/O: copy rootfs ──
+    // The rootfs copy shells out to `cp` and `chown` which can take seconds
     // on a slow disk. Running them on the tokio runtime thread would block
     // all other requests, so we offload to a blocking thread.
+    let kernel = state.jailer.kernel_path.clone();
+    let base_rootfs = state.jailer.rootfs_path.clone();
     let copy_strategy = state.jailer.copy_strategy.clone();
-    let vm_rootfs = PathBuf::from(VM_IMAGES_DIR).join(format!("{}.ext4", vm_id));
+    let vm_rootfs = state.jailer.vm_images_dir.join(format!("{}.ext4", vm_id));
     let vm_rootfs_clone = vm_rootfs.clone();
 
-    let kernel = tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
-        let kernel = std::fs::canonicalize("/opt/firecracker/vmlinux")
-            .context("Failed to resolve kernel path")?;
-        let base_rootfs = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
-            .context("Failed to resolve rootfs path")?;
-
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         copy_rootfs(
             &copy_strategy,
             &base_rootfs,
             &vm_rootfs_clone,
             JAILER_UID,
             JAILER_GID,
-        )?;
-
-        Ok(kernel)
+        )
     })
     .await
     .context("Rootfs copy task panicked")?

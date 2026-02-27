@@ -26,6 +26,12 @@ pub struct JailerConfig {
     pub firecracker_path: PathBuf,
     /// Absolute path to the jailer binary.
     pub jailer_path: PathBuf,
+    /// Absolute path to the kernel image.
+    pub kernel_path: PathBuf,
+    /// Absolute path to the base rootfs image.
+    pub rootfs_path: PathBuf,
+    /// Directory for per-VM rootfs copies.
+    pub vm_images_dir: PathBuf,
     /// Detected strategy for copying rootfs images per VM.
     pub copy_strategy: CopyStrategy,
     /// Host's outward-facing network interface (e.g. `eth0`).
