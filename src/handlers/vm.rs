@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::{
     Json,
     extract::{Path, State},
@@ -102,9 +103,9 @@ pub async fn create(
     // Resolve symlinks so the SDK hard-links the real files into the chroot
     // (symlink targets are outside the chroot and won't be visible to Firecracker).
     let kernel = std::fs::canonicalize("/opt/firecracker/vmlinux")
-        .map_err(|e| ApiError::internal(format!("Failed to resolve kernel path: {}", e)))?;
+        .context("Failed to resolve kernel path")?;
     let base_rootfs = std::fs::canonicalize("/opt/firecracker/rootfs.ext4")
-        .map_err(|e| ApiError::internal(format!("Failed to resolve rootfs path: {}", e)))?;
+        .context("Failed to resolve rootfs path")?;
 
     // Create a per-VM copy of the rootfs so each VM has its own writable disk.
     // On reflink-capable filesystems this is instant; otherwise a sparse copy.

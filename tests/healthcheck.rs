@@ -17,8 +17,7 @@ async fn healthcheck_returns_200_with_enriched_json() {
 
     assert_eq!(response.status().as_u16(), 200);
 
-    let text = response.text().await.expect("failed to read body");
-    let body: serde_json::Value = serde_json::from_str(&text).expect("failed to parse JSON");
+    let body: serde_json::Value = response.json().await.expect("failed to parse JSON");
 
     assert_eq!(body["status"], "healthy");
     assert!(body["version"].is_string());

@@ -157,4 +157,29 @@ src/
     mod.rs             -- re-exports
     config.rs          -- validation, cgroup config
     rootfs.rs          -- per-VM rootfs copy/cleanup
+tests/
+  common/mod.rs        -- shared dev-mode test server + HTTP client
+  healthcheck.rs       -- healthcheck integration tests
+  vm.rs                -- VM API integration tests (dev mode)
+  vm_lifecycle.rs      -- live integration tests (requires Firecracker)
+```
+
+## Testing
+
+Tests are split into two tiers based on what infrastructure they require. See [ADR 002](decisions/002-test-strategy.md) for the full decision record.
+
+### Tier 1: Fast Tests
+
+Run everywhere (macOS, CI, provisioned hosts) via `cargo test`. The server starts in development mode (`WARLOCK_DEV=true`), skipping Firecracker preflight checks. Covers unit tests for domain logic and integration tests for HTTP error paths, validation, and response structure.
+
+### Tier 2: Live Tests
+
+Run only on hosts with Firecracker, KVM, and the full jailer layout via `make test-live`. Gated by the `WARLOCK_LIVE=true` environment variable. Covers the full VM lifecycle (create, get, list, delete), custom configurations, and healthcheck with running VMs.
+
+```sh
+# Fast tests (everywhere)
+make test
+
+# Live tests (provisioned host only)
+make test-live
 ```
