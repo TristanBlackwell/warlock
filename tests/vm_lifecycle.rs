@@ -273,11 +273,12 @@ async fn create_vm_with_custom_config() {
 
     let addr = get_live_server_addr();
 
-    // Create with non-default config
+    // Create with non-default memory (1 vCPU is safe on any host;
+    // requesting 2+ vCPUs would fail on single-core droplets).
     let (create_status, create_body) = request(
         "POST",
         &format!("http://{}/vm", addr),
-        Some(serde_json::json!({ "vcpus": 2, "memory_mb": 256 })),
+        Some(serde_json::json!({ "vcpus": 1, "memory_mb": 256 })),
     )
     .await;
 
@@ -287,7 +288,7 @@ async fn create_vm_with_custom_config() {
     cleanup_vm(&addr, &vm_id).await;
 
     assert_eq!(create_status, 202, "expected 202 Accepted for create");
-    assert_eq!(create_body["vcpus"], 2);
+    assert_eq!(create_body["vcpus"], 1);
     assert_eq!(create_body["memory_mb"], 256);
     assert_eq!(create_body["state"], "Running");
     assert!(
