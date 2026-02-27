@@ -29,6 +29,34 @@ fn require_live() -> bool {
         .unwrap_or(false)
 }
 
+/// Cleans up stale resources from previous test runs.
+///
+/// Deletes any `fc*` tap devices and flushes nftables rules from the
+/// `firecracker` table. This prevents "Device or resource busy" errors
+/// when a previous test run left orphaned tap devices behind (e.g. due
+/// to a crash or assertion failure before cleanup).
+fn cleanup_stale_resources() {
+    // Find and delete any fc* tap devices
+    if let Ok(output) = Command::new("ip").args(["-o", "link", "show"]).output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            // Format: "N: fc0: <FLAGS> ..."
+            if let Some(name) = line.split_whitespace().nth(1) {
+                let name = name.trim_end_matches(':');
+                if name.starts_with("fc") && name[2..].chars().all(|c| c.is_ascii_digit()) {
+                    eprintln!("cleaning up stale tap device: {}", name);
+                    let _ = Command::new("ip").args(["link", "del", name]).output();
+                }
+            }
+        }
+    }
+
+    // Flush nftables rules from the firecracker table (preserves chains)
+    let _ = Command::new("nft")
+        .args(["flush", "table", "firecracker"])
+        .output();
+}
+
 /// Starts a **real-mode** Warlock server (no `WARLOCK_DEV`).
 ///
 /// This runs the full preflight check, so it will fail on machines without
@@ -39,6 +67,9 @@ fn get_live_server_addr() -> SocketAddr {
     static SERVER_ADDR: OnceLock<SocketAddr> = OnceLock::new();
 
     *SERVER_ADDR.get_or_init(|| {
+        // Clean up any stale tap devices / nftables rules from previous runs
+        cleanup_stale_resources();
+
         let (tx, rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
@@ -152,7 +183,16 @@ async fn full_lifecycle() {
     )
     .await;
 
-    let vm_id = create_body["id"].as_str().unwrap_or("").to_string();
+    assert_eq!(
+        create_status, 202,
+        "VM creation failed (status {}): {}",
+        create_status, create_body
+    );
+
+    let vm_id = create_body["id"]
+        .as_str()
+        .expect("create response missing 'id'")
+        .to_string();
 
     // ── Get ──
     let (get_status, get_body) =
@@ -179,10 +219,9 @@ async fn full_lifecycle() {
     let rootfs_exists = Path::new(&rootfs_path).exists();
 
     // ── Assert everything ──
-    // (assertions are after cleanup so the VM doesn't leak on failure)
+    // (assertions are after delete so the VM doesn't leak on failure)
 
-    // Create
-    assert_eq!(create_status, 202, "expected 202 Accepted for create");
+    // Create (status already asserted above — assert response fields here)
     assert!(
         uuid::Uuid::parse_str(&vm_id).is_ok(),
         "response id should be a valid UUID"

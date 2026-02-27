@@ -1,8 +1,10 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::{
+    http::StatusCode,
+    response::IntoResponse,
     routing::{delete, get},
-    Router,
+    Json, Router,
 };
 use firecracker_rs_sdk::instance::Instance;
 use tokio::sync::Mutex;
@@ -53,9 +55,17 @@ pub fn create_app(capacity: Capacity, jailer: JailerConfig) -> (Router, Arc<AppS
         .route("/vm", get(handlers::vm::list).post(handlers::vm::create))
         .route("/vm/{id}", get(handlers::vm::get))
         .route("/vm/{id}", delete(handlers::vm::delete))
+        .fallback(fallback)
         .layer(TraceLayer::new_for_http())
         .layer(CatchPanicLayer::new())
         .with_state(state.clone());
 
     (router, state)
+}
+
+async fn fallback() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "Not found" })),
+    )
 }
