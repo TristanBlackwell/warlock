@@ -13,9 +13,9 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use reqwest::Client;
-use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
 
 /// Returns true if the live test environment is available.
@@ -31,38 +31,41 @@ fn require_live() -> bool {
 /// Starts a **real-mode** Warlock server (no `WARLOCK_DEV`).
 ///
 /// This runs the full preflight check, so it will fail on machines without
-/// Firecracker/KVM/jailer. The server is started once and reused across all
-/// tests in this binary.
-async fn get_live_server_addr() -> SocketAddr {
-    static SERVER: once_cell::sync::Lazy<tokio::sync::Mutex<Option<SocketAddr>>> =
-        once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(None));
+/// Firecracker/KVM/jailer. The server is started once on a dedicated thread
+/// with its own tokio runtime, ensuring it outlives any individual
+/// `#[tokio::test]` runtime.
+fn get_live_server_addr() -> SocketAddr {
+    static SERVER_ADDR: OnceLock<SocketAddr> = OnceLock::new();
 
-    let mut guard = SERVER.lock().await;
-    if let Some(addr) = *guard {
-        return addr;
-    }
+    *SERVER_ADDR.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
 
-    // Ensure WARLOCK_DEV is NOT set — we want real preflight checks
-    unsafe {
-        std::env::remove_var("WARLOCK_DEV");
-    }
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(async {
+                // Ensure WARLOCK_DEV is NOT set — we want real preflight checks
+                unsafe {
+                    std::env::remove_var("WARLOCK_DEV");
+                }
 
-    let jailer_config = warlock::firecracker::preflight_check()
-        .expect("Firecracker preflight check failed — is this a provisioned host?");
+                let jailer_config = warlock::firecracker::preflight_check()
+                    .expect("Firecracker preflight check failed — is this a provisioned host?");
 
-    let host_capacity =
-        warlock::capacity::available_capacity().expect("Failed to get host capacity");
+                let host_capacity =
+                    warlock::capacity::available_capacity().expect("Failed to get host capacity");
 
-    let (app, _state) = warlock::app::create_app(host_capacity, jailer_config);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+                let (app, _state) = warlock::app::create_app(host_capacity, jailer_config);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
 
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+                tx.send(addr).expect("failed to send server address");
 
-    *guard = Some(addr);
-    addr
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+
+        rx.recv().expect("server thread failed to start")
+    })
 }
 
 fn get_client() -> &'static Client {
@@ -122,7 +125,7 @@ async fn full_lifecycle() {
         return;
     }
 
-    let addr = get_live_server_addr().await;
+    let addr = get_live_server_addr();
 
     // ── Create ──
     let (create_status, create_body) = request(
@@ -212,7 +215,7 @@ async fn create_vm_with_custom_config() {
         return;
     }
 
-    let addr = get_live_server_addr().await;
+    let addr = get_live_server_addr();
 
     // Create with non-default config
     let (create_status, create_body) = request(
@@ -246,7 +249,7 @@ async fn healthcheck_reflects_allocated_resources() {
         return;
     }
 
-    let addr = get_live_server_addr().await;
+    let addr = get_live_server_addr();
 
     // Create a VM so the healthcheck has something to report
     let (_, create_body) = request("POST", &format!("http://{}/vm", addr), None).await;

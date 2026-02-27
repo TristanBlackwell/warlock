@@ -4,7 +4,7 @@ use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn healthcheck_returns_200_with_enriched_json() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let client = common::get_client();
 
     let response = timeout(

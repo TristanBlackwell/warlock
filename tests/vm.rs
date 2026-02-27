@@ -38,7 +38,7 @@ async fn request(
 
 #[tokio::test]
 async fn list_vms_returns_empty_list() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let (status, body) = request("GET", &format!("http://{}/vm", addr), None).await;
 
     assert_eq!(status, 200);
@@ -50,7 +50,7 @@ async fn list_vms_returns_empty_list() {
 
 #[tokio::test]
 async fn create_vm_rejects_zero_vcpus() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",
         &format!("http://{}/vm", addr),
@@ -64,7 +64,7 @@ async fn create_vm_rejects_zero_vcpus() {
 
 #[tokio::test]
 async fn create_vm_rejects_odd_vcpus() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",
         &format!("http://{}/vm", addr),
@@ -78,7 +78,7 @@ async fn create_vm_rejects_odd_vcpus() {
 
 #[tokio::test]
 async fn create_vm_rejects_vcpus_over_max() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",
         &format!("http://{}/vm", addr),
@@ -92,7 +92,7 @@ async fn create_vm_rejects_vcpus_over_max() {
 
 #[tokio::test]
 async fn create_vm_rejects_memory_below_minimum() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",
         &format!("http://{}/vm", addr),
@@ -108,7 +108,7 @@ async fn create_vm_rejects_memory_below_minimum() {
 
 #[tokio::test]
 async fn get_nonexistent_vm_returns_404() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let id = Uuid::new_v4();
     let (status, body) = request("GET", &format!("http://{}/vm/{}", addr, id), None).await;
 
@@ -118,7 +118,7 @@ async fn get_nonexistent_vm_returns_404() {
 
 #[tokio::test]
 async fn delete_nonexistent_vm_returns_404() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let id = Uuid::new_v4();
     let (status, body) = request("DELETE", &format!("http://{}/vm/{}", addr, id), None).await;
 
@@ -130,7 +130,7 @@ async fn delete_nonexistent_vm_returns_404() {
 
 #[tokio::test]
 async fn get_vm_with_invalid_uuid_returns_400() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let client = common::get_client();
 
     let response = timeout(
@@ -148,7 +148,7 @@ async fn get_vm_with_invalid_uuid_returns_400() {
 
 #[tokio::test]
 async fn delete_vm_with_invalid_uuid_returns_400() {
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let client = common::get_client();
 
     let response = timeout(
@@ -171,7 +171,7 @@ async fn create_vm_with_valid_config_returns_500_in_dev_mode() {
     // In dev mode, validation passes but canonicalize("/opt/firecracker/vmlinux")
     // fails because the path doesn't exist. The error goes through
     // From<anyhow::Error> so the client sees a generic message.
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",
         &format!("http://{}/vm", addr),
@@ -187,7 +187,7 @@ async fn create_vm_with_valid_config_returns_500_in_dev_mode() {
 async fn create_vm_with_empty_body_returns_500_in_dev_mode() {
     // Empty JSON body means defaults (1 vCPU, 128 MB) — validation passes, but
     // filesystem operations fail in dev mode. Same obfuscation applies.
-    let addr = common::get_server_addr().await;
+    let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",
         &format!("http://{}/vm", addr),
