@@ -4,6 +4,7 @@ use std::process::Command;
 use tracing::{info, warn};
 
 use super::{CopyStrategy, JailerConfig};
+use crate::firecracker::network::detect_host_interface;
 use crate::firecracker::version::parse_and_validate_version;
 
 /// Runs all pre-flight checks for Firecracker and jailer availability.
@@ -22,6 +23,7 @@ pub fn preflight_check() -> Result<JailerConfig> {
             firecracker_path: PathBuf::from("firecracker"),
             jailer_path: PathBuf::from("jailer"),
             copy_strategy: CopyStrategy::Sparse,
+            host_interface: "eth0".into(),
         });
     }
 
@@ -62,12 +64,22 @@ pub fn preflight_check() -> Result<JailerConfig> {
         CopyStrategy::Sparse => info!("Rootfs copy strategy: sparse copy (no reflink support)"),
     }
 
+    // Networking checks
+    check_networking_prerequisites()?;
+
+    // Detect host network interface (env var override or default route)
+    let host_interface = std::env::var("WARLOCK_HOST_IFACE").unwrap_or_else(|_| {
+        detect_host_interface().expect("Failed to detect host network interface")
+    });
+    info!("Host network interface: {}", host_interface);
+
     info!("Firecracker pre-flight checks passed");
     Ok(JailerConfig {
         cgroup_version,
         firecracker_path,
         jailer_path,
         copy_strategy,
+        host_interface,
     })
 }
 
@@ -318,6 +330,67 @@ fn check_vm_images_dir() -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 fn check_vm_images_dir() -> Result<()> {
+    Ok(())
+}
+
+/// Checks networking prerequisites: `ip` and `nft` commands, IP forwarding,
+/// and nftables base table/chains.
+#[cfg(target_os = "linux")]
+fn check_networking_prerequisites() -> Result<()> {
+    // Check that `ip` command is available
+    which::which("ip").context(
+        "The 'ip' command (iproute2) is required for VM networking. \
+         Install it with: apt install iproute2",
+    )?;
+    info!("Networking: ip command available");
+
+    // Check that `nft` command is available
+    which::which("nft").context(
+        "The 'nft' command (nftables) is required for VM networking. \
+         Install it with: apt install nftables",
+    )?;
+    info!("Networking: nft command available");
+
+    // Check IP forwarding is enabled
+    let ip_forward = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
+        .context("Failed to read /proc/sys/net/ipv4/ip_forward")?;
+    if ip_forward.trim() != "1" {
+        bail!(
+            "IPv4 forwarding is not enabled. Run install-firecracker.sh or: \
+             echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward"
+        );
+    }
+    info!("Networking: IPv4 forwarding enabled");
+
+    // Check nftables firecracker table exists with required chains
+    let output = Command::new("nft")
+        .args(["list", "table", "firecracker"])
+        .output()
+        .context("Failed to query nftables")?;
+
+    if !output.status.success() {
+        bail!(
+            "nftables table 'firecracker' does not exist. Run install-firecracker.sh or:\n  \
+             sudo nft add table firecracker\n  \
+             sudo nft 'add chain firecracker postrouting {{ type nat hook postrouting priority srcnat; policy accept; }}'\n  \
+             sudo nft 'add chain firecracker filter {{ type filter hook forward priority filter; policy accept; }}'"
+        );
+    }
+
+    let table_output = String::from_utf8_lossy(&output.stdout);
+    if !table_output.contains("chain postrouting") {
+        bail!("nftables table 'firecracker' is missing the 'postrouting' chain");
+    }
+    if !table_output.contains("chain filter") {
+        bail!("nftables table 'firecracker' is missing the 'filter' chain");
+    }
+    info!("Networking: nftables firecracker table and chains present");
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_networking_prerequisites() -> Result<()> {
     Ok(())
 }
 

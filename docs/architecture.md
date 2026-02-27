@@ -85,16 +85,58 @@ Copies are stored at `/srv/jailer/vm-images/{vm_id}.ext4`, chowned to uid 1100, 
 
 See [ADR 001](decisions/001-writable-rootfs-strategy.md) for the full decision record.
 
+## Networking
+
+Every VM gets a dedicated network connection to the internet via NAT. Networking is configured automatically during VM creation -- no guest-side software (DHCP, iproute2) is required.
+
+### Per-VM Network Setup
+
+Each VM is assigned a `/30` subnet from the `172.16.0.0/16` range, providing a tap IP (host side) and a guest IP (VM side). Warlock manages 16,384 subnets via a bitmap pool.
+
+On creation:
+1. **Allocate subnet** from the pool (tap IP, guest IP, tap device name)
+2. **Create tap device** (`ip tuntap add`, `ip addr add`, `ip link set up`)
+3. **Add NAT rules** via nftables (masquerade + forwarding, handles stored for cleanup)
+4. **Attach to Firecracker** via `put_guest_network_interface_by_id`
+5. **Configure guest** via kernel `ip=` boot argument (automatic, no guest deps)
+
+On deletion (or shutdown): delete tap device, remove nft rules, release subnet back to pool.
+
+### IP Allocation
+
+Sequential `/30` subnets using Firecracker's documented formula:
+- Tap IP: `172.16.[(4*N+1)/256].[(4*N+1)%256]`
+- Guest IP: `172.16.[(4*N+2)/256].[(4*N+2)%256]`
+
+Where `N` is the 0-based subnet index. Deleted subnets are recycled.
+
+### Host Prerequisites
+
+The following must be configured once (handled by `install-firecracker.sh`):
+- IPv4 forwarding enabled and persisted (`/etc/sysctl.d/99-firecracker.conf`)
+- nftables `firecracker` table with `postrouting` (NAT) and `filter` (forwarding) chains
+- `ip` and `nft` commands available
+
+Warlock validates all prerequisites at startup via preflight checks. The host's outward-facing interface is auto-detected from the default route (or overridden via `WARLOCK_HOST_IFACE`).
+
+### Tap Device Naming
+
+Linux interface names are limited to 15 characters. Tap devices are named `fc{N}` (e.g. `fc0`, `fc42`) based on the subnet index, guaranteeing uniqueness and staying well within the limit.
+
 ## State Model
 
 All VM state lives in an in-memory `HashMap<Uuid, VmEntry>` behind a `tokio::sync::Mutex`:
 
 ```rust
 pub struct VmEntry {
-    pub instance: Instance,  // SDK handle (Send but not Sync)
+    pub instance: Instance,             // SDK handle (Send but not Sync)
     pub vcpus: u8,
     pub memory_mb: u32,
-    pub rootfs_copy: Option<PathBuf>,
+    pub rootfs_copy: Option<PathBuf>,   // per-VM rootfs copy
+    pub tap_name: Option<String>,       // tap device name (e.g. "fc0")
+    pub subnet_index: Option<u16>,      // subnet pool index
+    pub nat_handles: Option<NatHandles>,// nftables rule handles
+    pub guest_ip: Option<String>,       // guest IP address
 }
 ```
 
@@ -151,11 +193,13 @@ src/
     vm.rs              -- create/get/list/delete handlers
   firecracker/
     mod.rs             -- JailerConfig, CopyStrategy, constants
+    network.rs         -- tap device and nftables management
     preflight.rs       -- startup checks and detection
     version.rs         -- Firecracker version parsing
   vm/
     mod.rs             -- re-exports
     config.rs          -- validation, cgroup config
+    network.rs         -- subnet pool, IP allocation, boot args
     rootfs.rs          -- per-VM rootfs copy/cleanup
 tests/
   common/mod.rs        -- shared dev-mode test server + HTTP client

@@ -10,7 +10,9 @@ use axum::{
 use firecracker_rs_sdk::{
     firecracker::FirecrackerOption,
     jailer::{ChrootStrategy, JailerOption},
-    models::{BootSource, Drive, InstanceInfo, InstanceState, MachineConfiguration},
+    models::{
+        BootSource, Drive, InstanceInfo, InstanceState, MachineConfiguration, NetworkInterface,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
@@ -18,8 +20,10 @@ use uuid::Uuid;
 
 use crate::app::{AppState, VmEntry};
 use crate::error::ApiError;
+use crate::firecracker::network::{add_nat_rules, create_tap, delete_tap, remove_nat_rules};
 use crate::firecracker::{JAILER_GID, JAILER_UID, VM_IMAGES_DIR};
 use crate::vm::config::{build_cgroup_config, validate_vm_config};
+use crate::vm::network::build_network_boot_args;
 use crate::vm::rootfs::{cleanup_rootfs_copy, copy_rootfs};
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +41,7 @@ pub struct CreateVmResponse {
     pub memory_mb: u32,
     pub state: InstanceState,
     pub vmm_version: String,
+    pub guest_ip: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +51,8 @@ pub struct VmSummary {
     pub memory_mb: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<InstanceState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_ip: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +82,7 @@ pub async fn list(
             vcpus: entry.vcpus,
             memory_mb: entry.memory_mb,
             state: instance_state,
+            guest_ip: entry.guest_ip.clone(),
         });
     }
 
@@ -120,6 +128,34 @@ pub async fn create(
 
     debug!(vm_id = %vm_id, "Rootfs copied to {}", vm_rootfs.display());
 
+    // ── Networking: allocate subnet ──
+    let subnet = {
+        let mut pool = state.subnet_pool.lock().await;
+        pool.allocate()
+            .ok_or_else(|| ApiError::conflict("No available network subnets"))?
+    };
+
+    debug!(vm_id = %vm_id, tap = %subnet.tap_name, guest_ip = %subnet.guest_ip, "Subnet allocated");
+
+    // ── Networking: create tap device ──
+    if let Err(e) = create_tap(&subnet.tap_name, &subnet.tap_ip) {
+        // Roll back subnet allocation
+        state.subnet_pool.lock().await.release(subnet.index);
+        return Err(ApiError::from(e));
+    }
+
+    // ── Networking: add NAT rules ──
+    let nat_handles =
+        match add_nat_rules(&subnet.guest_ip, &subnet.tap_name, &state.jailer.host_interface) {
+            Ok(handles) => handles,
+            Err(e) => {
+                // Roll back: delete tap + release subnet
+                delete_tap(&subnet.tap_name);
+                state.subnet_pool.lock().await.release(subnet.index);
+                return Err(ApiError::from(e));
+            }
+        };
+
     // Lock the VM map for the entire create operation to prevent race conditions
     // on the capacity check.
     let mut vms = state.vms.lock().await;
@@ -135,6 +171,10 @@ pub async fn create(
         .saturating_sub(allocated_memory);
 
     if (vcpus as u64) > available_vcpus as u64 {
+        // Roll back networking
+        remove_nat_rules(&nat_handles);
+        delete_tap(&subnet.tap_name);
+        state.subnet_pool.lock().await.release(subnet.index);
         return Err(ApiError::conflict(format!(
             "Insufficient vCPUs: requested {} but only {} available",
             vcpus, available_vcpus,
@@ -142,6 +182,10 @@ pub async fn create(
     }
 
     if (memory_mb as u64) > available_memory {
+        // Roll back networking
+        remove_nat_rules(&nat_handles);
+        delete_tap(&subnet.tap_name);
+        state.subnet_pool.lock().await.release(subnet.index);
         return Err(ApiError::conflict(format!(
             "Insufficient memory: requested {} MB but only {} MB available",
             memory_mb, available_memory,
@@ -199,15 +243,35 @@ pub async fn create(
 
     // Guest Boot Source — the SDK hard-links the kernel into the chroot and
     // rewrites the path for Firecracker automatically.
+    // Boot args include the kernel ip= parameter for automatic network config.
+    let network_boot_args = build_network_boot_args(&subnet.guest_ip, &subnet.tap_ip);
+    let boot_args = format!(
+        "console=ttyS0 reboot=k panic=1 pci=off {}",
+        network_boot_args
+    );
+
     instance
         .put_guest_boot_source(&BootSource {
-            boot_args: Some("console=ttyS0 reboot=k panic=1 pci=off".into()),
+            boot_args: Some(boot_args),
             initrd_path: None,
             kernel_image_path: kernel.clone(),
         })
         .await?;
 
     debug!(vm_id = %vm_id, "Boot source added");
+
+    // Guest Network Interface — attach the tap device to the VM.
+    instance
+        .put_guest_network_interface_by_id(&NetworkInterface {
+            iface_id: "eth0".into(),
+            host_dev_name: PathBuf::from(&subnet.tap_name),
+            guest_mac: None,
+            rx_rate_limiter: None,
+            tx_rate_limiter: None,
+        })
+        .await?;
+
+    debug!(vm_id = %vm_id, tap = %subnet.tap_name, "Network interface added");
 
     // Guest Drives — each VM gets its own writable rootfs copy.
     instance
@@ -232,7 +296,9 @@ pub async fn create(
 
     let desc = instance.describe_instance().await?;
 
-    info!(vm_id = %vm_id, state = ?desc.state, "VM instance started");
+    let guest_ip = subnet.guest_ip.to_string();
+
+    info!(vm_id = %vm_id, state = ?desc.state, guest_ip = %guest_ip, "VM instance started");
 
     // Register the instance in state
     vms.insert(
@@ -242,6 +308,10 @@ pub async fn create(
             vcpus,
             memory_mb,
             rootfs_copy: Some(vm_rootfs),
+            tap_name: Some(subnet.tap_name),
+            subnet_index: Some(subnet.index),
+            nat_handles: Some(nat_handles),
+            guest_ip: Some(guest_ip.clone()),
         },
     );
 
@@ -253,6 +323,7 @@ pub async fn create(
             memory_mb,
             state: desc.state,
             vmm_version: desc.vmm_version,
+            guest_ip,
         }),
     ))
 }
@@ -289,12 +360,26 @@ pub async fn delete(
         error!(vm_id = %id, error = ?e, "Graceful stop failed, instance will be force-terminated on drop");
     }
 
-    // Capture the rootfs copy path before dropping the entry
+    // Capture cleanup info before dropping the entry
     let rootfs_copy = entry.rootfs_copy.clone();
+    let tap_name = entry.tap_name.clone();
+    let nat_handles = entry.nat_handles;
+    let subnet_index = entry.subnet_index;
 
     // Entry is dropped here — the SDK's FStack sends SIGTERM to the Firecracker
     // process and cleans up the socket file and jailer workspace directory.
     drop(entry);
+
+    // Clean up networking: tap device, NAT rules, subnet allocation
+    if let Some(ref name) = tap_name {
+        delete_tap(name);
+    }
+    if let Some(ref handles) = nat_handles {
+        remove_nat_rules(handles);
+    }
+    if let Some(index) = subnet_index {
+        state.subnet_pool.lock().await.release(index);
+    }
 
     // Clean up the per-VM rootfs copy (outside the jailer workspace)
     if let Some(ref path) = rootfs_copy {

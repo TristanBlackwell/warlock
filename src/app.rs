@@ -9,7 +9,12 @@ use tokio::sync::Mutex;
 use tower_http::{catch_panic::CatchPanicLayer, trace::TraceLayer};
 use uuid::Uuid;
 
-use crate::{capacity::Capacity, firecracker::JailerConfig, handlers};
+use crate::{
+    capacity::Capacity,
+    firecracker::{network::NatHandles, JailerConfig},
+    handlers,
+    vm::network::SubnetPool,
+};
 
 /// A running VM and the resources allocated to it.
 pub struct VmEntry {
@@ -18,12 +23,21 @@ pub struct VmEntry {
     pub memory_mb: u32,
     /// Path to the per-VM rootfs copy (cleaned up on delete/shutdown).
     pub rootfs_copy: Option<PathBuf>,
+    /// Name of the tap device (e.g. `fc0`), if networking is configured.
+    pub tap_name: Option<String>,
+    /// Subnet pool index for this VM's /30 allocation.
+    pub subnet_index: Option<u16>,
+    /// nftables rule handles for NAT cleanup.
+    pub nat_handles: Option<NatHandles>,
+    /// Guest IP address assigned to this VM.
+    pub guest_ip: Option<String>,
 }
 
 pub struct AppState {
     pub capacity: Capacity,
     pub jailer: JailerConfig,
     pub vms: Mutex<HashMap<Uuid, VmEntry>>,
+    pub subnet_pool: Mutex<SubnetPool>,
 }
 
 pub fn create_app(capacity: Capacity, jailer: JailerConfig) -> (Router, Arc<AppState>) {
@@ -31,6 +45,7 @@ pub fn create_app(capacity: Capacity, jailer: JailerConfig) -> (Router, Arc<AppS
         capacity,
         jailer,
         vms: Mutex::new(HashMap::new()),
+        subnet_pool: Mutex::new(SubnetPool::new()),
     });
 
     let router = Router::new()

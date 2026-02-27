@@ -50,9 +50,26 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = entry.instance.stop().await {
                 error!(vm_id = %id, error = ?e, "Graceful stop failed, force-terminating");
             }
+
             let rootfs_copy = entry.rootfs_copy.clone();
+            let tap_name = entry.tap_name.clone();
+            let nat_handles = entry.nat_handles;
+            let subnet_index = entry.subnet_index;
+
             // Entry is dropped here — SIGTERM + socket + jailer workspace cleanup via FStack
             drop(entry);
+
+            // Clean up networking: tap device, NAT rules, subnet allocation
+            if let Some(ref name) = tap_name {
+                firecracker::network::delete_tap(name);
+            }
+            if let Some(ref handles) = nat_handles {
+                firecracker::network::remove_nat_rules(handles);
+            }
+            if let Some(index) = subnet_index {
+                state.subnet_pool.lock().await.release(index);
+            }
+
             // Clean up the per-VM rootfs copy (outside the jailer workspace)
             if let Some(ref path) = rootfs_copy {
                 if let Err(e) = std::fs::remove_file(path) {

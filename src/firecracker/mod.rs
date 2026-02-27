@@ -1,3 +1,4 @@
+pub mod network;
 mod preflight;
 mod version;
 
@@ -27,4 +28,6 @@ pub struct JailerConfig {
     pub jailer_path: PathBuf,
     /// Detected strategy for copying rootfs images per VM.
     pub copy_strategy: CopyStrategy,
+    /// Host's outward-facing network interface (e.g. `eth0`).
+    pub host_interface: String,
 }

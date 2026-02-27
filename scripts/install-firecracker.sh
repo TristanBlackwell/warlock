@@ -89,7 +89,43 @@ info "Jailer chroot base: /srv/jailer"
 info "VM images directory: /srv/jailer/vm-images"
 
 # ---------------------------------------------------------------------------
-# 2. Install Firecracker binary
+# 2. Configure networking for VM connectivity
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "Configuring networking..."
+
+# Ensure nftables is available
+if ! command -v nft >/dev/null 2>&1; then
+  info "Installing nftables..."
+  $SUDO apt-get update -qq && $SUDO apt-get install -y -qq nftables >/dev/null
+fi
+
+# Enable IPv4 forwarding (persistent)
+if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
+  info "Enabling IPv4 forwarding..."
+  $SUDO sysctl -w net.ipv4.ip_forward=1 >/dev/null
+fi
+
+# Persist across reboots
+if [ ! -f /etc/sysctl.d/99-firecracker.conf ] || ! grep -q "net.ipv4.ip_forward" /etc/sysctl.d/99-firecracker.conf 2>/dev/null; then
+  echo "net.ipv4.ip_forward = 1" | $SUDO tee /etc/sysctl.d/99-firecracker.conf >/dev/null
+  info "IPv4 forwarding persisted to /etc/sysctl.d/99-firecracker.conf"
+fi
+
+# Create nftables table and chains for VM NAT (idempotent)
+if ! $SUDO nft list table firecracker >/dev/null 2>&1; then
+  info "Creating nftables firecracker table and chains..."
+  $SUDO nft add table firecracker
+  $SUDO nft 'add chain firecracker postrouting { type nat hook postrouting priority srcnat; policy accept; }'
+  $SUDO nft 'add chain firecracker filter { type filter hook forward priority filter; policy accept; }'
+  info "nftables firecracker table created with postrouting and filter chains"
+else
+  info "nftables firecracker table already exists"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Install Firecracker binary
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -128,7 +164,7 @@ done
 info "Firecracker ${LATEST_TAG} installed."
 
 # ---------------------------------------------------------------------------
-# 3. Download kernel and rootfs from Firecracker CI
+# 4. Download kernel and rootfs from Firecracker CI
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -170,7 +206,7 @@ curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/${LATEST_UBUNTU_KEY}" \
   || error "Failed to download Ubuntu rootfs."
 
 # ---------------------------------------------------------------------------
-# 4. Prepare rootfs (unsquash, patch SSH key, create ext4)
+# 5. Prepare rootfs (unsquash, patch SSH key, create ext4)
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -204,7 +240,7 @@ truncate -s 1G "${WORK_DIR}/${ROOTFS_NAME}"
 $SUDO mkfs.ext4 -d "${WORK_DIR}/squashfs-root" -F "${WORK_DIR}/${ROOTFS_NAME}" >/dev/null 2>&1
 
 # ---------------------------------------------------------------------------
-# 5. Install assets to /opt/firecracker/
+# 6. Install assets to /opt/firecracker/
 # ---------------------------------------------------------------------------
 
 echo ""

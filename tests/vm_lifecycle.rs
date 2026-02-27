@@ -171,6 +171,10 @@ async fn full_lifecycle() {
     assert_eq!(create_body["memory_mb"], 128);
     assert_eq!(create_body["state"], "Running");
     assert!(create_body["vmm_version"].is_string());
+    assert!(
+        create_body["guest_ip"].is_string(),
+        "response should include guest_ip"
+    );
 
     // Get
     assert_eq!(get_status, 200, "expected 200 for get");
@@ -227,6 +231,10 @@ async fn create_vm_with_custom_config() {
     assert_eq!(create_body["vcpus"], 2);
     assert_eq!(create_body["memory_mb"], 256);
     assert_eq!(create_body["state"], "Running");
+    assert!(
+        create_body["guest_ip"].is_string(),
+        "response should include guest_ip"
+    );
 }
 
 // ── Healthcheck with running VMs ──
