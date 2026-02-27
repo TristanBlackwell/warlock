@@ -4,3 +4,4 @@ pub mod error;
 pub mod firecracker;
 pub mod handlers;
 pub mod logging;
+pub mod vm;

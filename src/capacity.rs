@@ -55,3 +55,45 @@ pub fn available_capacity() -> anyhow::Result<Capacity> {
         vcpus: total_cpus,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocatable_memory_subtracts_reservation() {
+        let cap = Capacity {
+            memory_mb: 1024,
+            vcpus: 1,
+        };
+        assert_eq!(cap.allocatable_memory_mb(), 1024 - 256);
+    }
+
+    #[test]
+    fn allocatable_memory_saturates_at_zero() {
+        let cap = Capacity {
+            memory_mb: 128,
+            vcpus: 1,
+        };
+        // 128 MB < 256 MB reservation, should saturate to 0
+        assert_eq!(cap.allocatable_memory_mb(), 0);
+    }
+
+    #[test]
+    fn allocatable_memory_exact_reservation() {
+        let cap = Capacity {
+            memory_mb: 256,
+            vcpus: 1,
+        };
+        assert_eq!(cap.allocatable_memory_mb(), 0);
+    }
+
+    #[test]
+    fn allocatable_memory_just_above_reservation() {
+        let cap = Capacity {
+            memory_mb: 257,
+            vcpus: 1,
+        };
+        assert_eq!(cap.allocatable_memory_mb(), 1);
+    }
+}

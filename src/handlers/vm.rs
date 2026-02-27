@@ -1,5 +1,4 @@
-use std::path::{Path as StdPath, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -18,12 +17,9 @@ use uuid::Uuid;
 
 use crate::app::{AppState, VmEntry};
 use crate::error::ApiError;
-use crate::firecracker::{CopyStrategy, JAILER_GID, JAILER_UID, VM_IMAGES_DIR};
-
-const DEFAULT_VCPUS: u8 = 1;
-const DEFAULT_MEMORY_MB: u32 = 128;
-const MIN_MEMORY_MB: u32 = 128;
-const MAX_VCPUS: u8 = 32;
+use crate::firecracker::{JAILER_GID, JAILER_UID, VM_IMAGES_DIR};
+use crate::vm::config::{build_cgroup_config, validate_vm_config};
+use crate::vm::rootfs::{cleanup_rootfs_copy, copy_rootfs};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateVmRequest {
@@ -42,106 +38,50 @@ pub struct CreateVmResponse {
     pub vmm_version: String,
 }
 
-/// Validates the requested VM configuration and returns the resolved (vcpus, memory_mb).
-fn validate_vm_config(req: &Option<CreateVmRequest>) -> Result<(u8, u32), ApiError> {
-    let vcpus = req.as_ref().and_then(|r| r.vcpus).unwrap_or(DEFAULT_VCPUS);
-    let memory_mb = req
-        .as_ref()
-        .and_then(|r| r.memory_mb)
-        .unwrap_or(DEFAULT_MEMORY_MB);
-
-    if vcpus == 0 || vcpus > MAX_VCPUS || (vcpus > 1 && vcpus % 2 != 0) {
-        return Err(ApiError::unprocessable(
-            "vcpus must be 1 or an even number between 2 and 32",
-        ));
-    }
-
-    if memory_mb < MIN_MEMORY_MB {
-        return Err(ApiError::unprocessable(format!(
-            "memory_mb must be at least {}",
-            MIN_MEMORY_MB,
-        )));
-    }
-
-    Ok((vcpus, memory_mb))
+#[derive(Debug, Serialize)]
+pub struct VmSummary {
+    pub id: Uuid,
+    pub vcpus: u8,
+    pub memory_mb: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<InstanceState>,
 }
 
-/// Builds the cgroup configuration for a jailed VM based on the detected
-/// cgroup version and requested resources.
-fn build_cgroup_config(cgroup_version: usize, vcpus: u8, memory_mb: u32) -> Vec<(String, String)> {
-    // Memory limit: VM allocation + 50 MB overhead for the Firecracker process
-    let memory_limit_bytes = ((memory_mb as u64) + 50) * 1024 * 1024;
-    // CPU quota: 100% of one physical core per vCPU (100_000 us per 100_000 us period)
-    let cpu_quota = (vcpus as u64) * 100_000;
-
-    match cgroup_version {
-        2 => vec![
-            ("cpu.max".into(), format!("{} 100000", cpu_quota)),
-            ("memory.max".into(), memory_limit_bytes.to_string()),
-        ],
-        _ => vec![
-            ("cpu.cfs_quota_us".into(), cpu_quota.to_string()),
-            ("cpu.cfs_period_us".into(), "100000".into()),
-            (
-                "memory.limit_in_bytes".into(),
-                memory_limit_bytes.to_string(),
-            ),
-        ],
-    }
+#[derive(Debug, Serialize)]
+pub struct ListVmsResponse {
+    pub vms: Vec<VmSummary>,
+    pub count: usize,
 }
 
-/// Creates a per-VM copy of the rootfs image using the best available strategy.
-///
-/// On reflink-capable filesystems (btrfs, XFS) this is an instant CoW clone.
-/// Otherwise falls back to a sparse copy.
-fn copy_rootfs(
-    strategy: &CopyStrategy,
-    source: &StdPath,
-    dest: &StdPath,
-) -> Result<(), ApiError> {
-    let args: &[&str] = match strategy {
-        CopyStrategy::Reflink => &["--reflink=always"],
-        CopyStrategy::Sparse => &["--sparse=always"],
-    };
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ListVmsResponse>, ApiError> {
+    let mut vms = state.vms.lock().await;
 
-    let output = Command::new("cp")
-        .args(args)
-        .arg(source)
-        .arg(dest)
-        .output()
-        .map_err(|e| ApiError::internal(format!("Failed to execute cp: {}", e)))?;
+    let mut summaries = Vec::with_capacity(vms.len());
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ApiError::internal(format!(
-            "Failed to copy rootfs: {}",
-            stderr.trim()
-        )));
+    for (id, entry) in vms.iter_mut() {
+        let instance_state = match entry.instance.describe_instance().await {
+            Ok(info) => Some(info.state),
+            Err(e) => {
+                error!(vm_id = %id, error = ?e, "Failed to query VM state");
+                None
+            }
+        };
+
+        summaries.push(VmSummary {
+            id: *id,
+            vcpus: entry.vcpus,
+            memory_mb: entry.memory_mb,
+            state: instance_state,
+        });
     }
 
-    // Set ownership so Firecracker (uid 1100) can read/write the copy
-    let output = Command::new("chown")
-        .arg(format!("{}:{}", JAILER_UID, JAILER_GID))
-        .arg(dest)
-        .output()
-        .map_err(|e| ApiError::internal(format!("Failed to execute chown: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ApiError::internal(format!(
-            "Failed to chown rootfs copy: {}",
-            stderr.trim()
-        )));
-    }
-
-    Ok(())
-}
-
-/// Removes a per-VM rootfs copy, logging any errors.
-fn cleanup_rootfs_copy(vm_id: &Uuid, path: &StdPath) {
-    if let Err(e) = std::fs::remove_file(path) {
-        error!(vm_id = %vm_id, path = %path.display(), error = ?e, "Failed to remove rootfs copy");
-    }
+    let count = summaries.len();
+    Ok(Json(ListVmsResponse {
+        vms: summaries,
+        count,
+    }))
 }
 
 pub async fn create(
@@ -149,7 +89,13 @@ pub async fn create(
     body: Option<Json<CreateVmRequest>>,
 ) -> Result<(StatusCode, Json<CreateVmResponse>), ApiError> {
     let req = body.map(|Json(r)| r);
-    let (vcpus, memory_mb) = validate_vm_config(&req)?;
+    let (req_vcpus, req_memory) = match &req {
+        Some(r) => (r.vcpus, r.memory_mb),
+        None => (None, None),
+    };
+
+    let (vcpus, memory_mb) = validate_vm_config(req_vcpus, req_memory)
+        .map_err(|e| ApiError::unprocessable(e.to_string()))?;
 
     let vm_id = Uuid::new_v4();
 
@@ -163,7 +109,13 @@ pub async fn create(
     // Create a per-VM copy of the rootfs so each VM has its own writable disk.
     // On reflink-capable filesystems this is instant; otherwise a sparse copy.
     let vm_rootfs = PathBuf::from(VM_IMAGES_DIR).join(format!("{}.ext4", vm_id));
-    copy_rootfs(&state.jailer.copy_strategy, &base_rootfs, &vm_rootfs)?;
+    copy_rootfs(
+        &state.jailer.copy_strategy,
+        &base_rootfs,
+        &vm_rootfs,
+        JAILER_UID,
+        JAILER_GID,
+    )?;
 
     debug!(vm_id = %vm_id, "Rootfs copied to {}", vm_rootfs.display());
 
@@ -351,132 +303,4 @@ pub async fn delete(
     info!(vm_id = %id, "VM instance terminated and cleaned up");
 
     Ok(Json(serde_json::json!({ "id": id, "deleted": true })))
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::http::StatusCode;
-
-    use super::*;
-
-    fn req(vcpus: Option<u8>, memory_mb: Option<u32>) -> Option<CreateVmRequest> {
-        Some(CreateVmRequest { vcpus, memory_mb })
-    }
-
-    // ── Defaults ──
-
-    #[test]
-    fn defaults_when_no_body() {
-        let (vcpus, memory_mb) = validate_vm_config(&None).unwrap();
-        assert_eq!(vcpus, 1);
-        assert_eq!(memory_mb, 128);
-    }
-
-    #[test]
-    fn defaults_when_fields_are_none() {
-        let (vcpus, memory_mb) = validate_vm_config(&req(None, None)).unwrap();
-        assert_eq!(vcpus, 1);
-        assert_eq!(memory_mb, 128);
-    }
-
-    // ── Valid vCPU values ──
-
-    #[test]
-    fn accepts_1_vcpu() {
-        let (vcpus, _) = validate_vm_config(&req(Some(1), None)).unwrap();
-        assert_eq!(vcpus, 1);
-    }
-
-    #[test]
-    fn accepts_even_vcpus() {
-        for n in [2, 4, 8, 16, 32] {
-            let (vcpus, _) = validate_vm_config(&req(Some(n), None)).unwrap();
-            assert_eq!(vcpus, n);
-        }
-    }
-
-    // ── Invalid vCPU values ──
-
-    #[test]
-    fn rejects_0_vcpus() {
-        let err = validate_vm_config(&req(Some(0), None)).unwrap_err();
-        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[test]
-    fn rejects_odd_vcpus_greater_than_1() {
-        for n in [3, 5, 7, 15, 31] {
-            let err = validate_vm_config(&req(Some(n), None)).unwrap_err();
-            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
-        }
-    }
-
-    #[test]
-    fn rejects_vcpus_over_32() {
-        let err = validate_vm_config(&req(Some(34), None)).unwrap_err();
-        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    // ── Valid memory values ──
-
-    #[test]
-    fn accepts_minimum_memory() {
-        let (_, memory_mb) = validate_vm_config(&req(None, Some(128))).unwrap();
-        assert_eq!(memory_mb, 128);
-    }
-
-    #[test]
-    fn accepts_large_memory() {
-        let (_, memory_mb) = validate_vm_config(&req(None, Some(4096))).unwrap();
-        assert_eq!(memory_mb, 4096);
-    }
-
-    // ── Invalid memory values ──
-
-    #[test]
-    fn rejects_memory_below_minimum() {
-        let err = validate_vm_config(&req(None, Some(64))).unwrap_err();
-        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    // ── Cgroup configuration ──
-
-    #[test]
-    fn cgroup_v2_config() {
-        let cgroups = build_cgroup_config(2, 1, 128);
-        assert_eq!(cgroups.len(), 2);
-        // 1 vCPU = 100_000 us quota per 100_000 us period
-        assert_eq!(cgroups[0], ("cpu.max".into(), "100000 100000".into()));
-        // 128 MB + 50 MB overhead = 178 MB in bytes
-        let expected_mem = ((128u64 + 50) * 1024 * 1024).to_string();
-        assert_eq!(cgroups[1], ("memory.max".into(), expected_mem));
-    }
-
-    #[test]
-    fn cgroup_v2_config_multi_vcpu() {
-        let cgroups = build_cgroup_config(2, 4, 256);
-        // 4 vCPUs = 400_000 us quota
-        assert_eq!(cgroups[0], ("cpu.max".into(), "400000 100000".into()));
-        let expected_mem = ((256u64 + 50) * 1024 * 1024).to_string();
-        assert_eq!(cgroups[1], ("memory.max".into(), expected_mem));
-    }
-
-    #[test]
-    fn cgroup_v1_config() {
-        let cgroups = build_cgroup_config(1, 2, 256);
-        assert_eq!(cgroups.len(), 3);
-        assert_eq!(
-            cgroups[0],
-            ("cpu.cfs_quota_us".into(), "200000".into())
-        );
-        assert_eq!(
-            cgroups[1],
-            ("cpu.cfs_period_us".into(), "100000".into())
-        );
-        let expected_mem = ((256u64 + 50) * 1024 * 1024).to_string();
-        assert_eq!(
-            cgroups[2],
-            ("memory.limit_in_bytes".into(), expected_mem)
-        );
-    }
 }

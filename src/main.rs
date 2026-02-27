@@ -7,6 +7,7 @@ mod error;
 mod firecracker;
 mod handlers;
 mod logging;
+mod vm;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

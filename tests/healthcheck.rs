@@ -3,7 +3,7 @@ mod common;
 use tokio::time::{timeout, Duration};
 
 #[tokio::test]
-async fn healthcheck_returns_200_and_expected_message() {
+async fn healthcheck_returns_200_with_enriched_json() {
     let addr = common::get_server_addr().await;
     let client = common::get_client();
 
@@ -17,6 +17,14 @@ async fn healthcheck_returns_200_and_expected_message() {
 
     assert_eq!(response.status().as_u16(), 200);
 
-    let body = response.text().await.expect("failed to read body");
-    assert_eq!(body, "Alive and kickin");
+    let text = response.text().await.expect("failed to read body");
+    let body: serde_json::Value = serde_json::from_str(&text).expect("failed to parse JSON");
+
+    assert_eq!(body["status"], "healthy");
+    assert!(body["version"].is_string());
+    assert!(body["capacity"].is_object());
+    assert!(body["capacity"]["total_vcpus"].as_u64().unwrap() > 0);
+    assert!(body["capacity"]["total_memory_mb"].as_u64().unwrap() > 0);
+    assert_eq!(body["vms"]["count"], 0);
+    assert_eq!(body["copy_strategy"], "sparse"); // dev mode defaults to sparse
 }

@@ -1,59 +1,114 @@
 # Warlock
 
-Warlock is an experimental application providing a control plane over [Firecracker](https://github.com/firecracker-microvm/firecracker) on a Linux machine.
+Warlock is an experimental control plane for [Firecracker](https://github.com/firecracker-microvm/firecracker) microVMs. It exposes an HTTP API for creating, querying, listing, and deleting virtual machines on a Linux host, with automatic jailer integration for security isolation, per-VM rootfs copies, and resource management.
 
+For a deeper look at how Warlock works internally, see the [architecture overview](docs/architecture.md).
+
+## API
+
+All endpoints return JSON.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/internal/hc` | Healthcheck -- returns status, capacity, VM count, copy strategy |
+| `POST` | `/vm` | Create a VM (202 Accepted) |
+| `GET` | `/vm` | List all VMs with state and resource allocation |
+| `GET` | `/vm/{id}` | Get a specific VM's state |
+| `DELETE` | `/vm/{id}` | Stop and delete a VM |
+
+### Create VM
+
+```bash
+curl -X POST http://localhost:3000/vm \
+  -H "Content-Type: application/json" \
+  -d '{"vcpus": 2, "memory_mb": 256}'
+```
+
+Both fields are optional. Defaults: 1 vCPU, 128 MB memory. Constraints: vCPUs must be 1 or an even number up to 32; memory must be at least 128 MB.
+
+### List VMs
+
+```bash
+curl http://localhost:3000/vm
+```
+
+### Healthcheck
+
+```bash
+curl http://localhost:3000/internal/hc
+```
+
+Returns capacity, running VM count, allocated resources, and the detected rootfs copy strategy.
+
+## Host Setup
+
+Warlock requires a Linux host with KVM support. The [`install-firecracker.sh`](scripts/install-firecracker.sh) script handles all host prerequisites:
+
+- Creates the `firecracker` system user (uid/gid 1100)
+- Downloads Firecracker and jailer binaries
+- Downloads the getting-started kernel and rootfs images to `/opt/firecracker/`
+- Creates `/srv/jailer/` and `/srv/jailer/vm-images/` directories
+
+```bash
+sudo ./scripts/install-firecracker.sh
+```
+
+> [!IMPORTANT]
+> `/opt/firecracker` and `/srv/jailer` must be on the same filesystem. The jailer uses hard links, which cannot cross filesystem boundaries.
+
+## Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `FIRECRACKER_BIN` | Path to the Firecracker binary | Resolved from `PATH` |
+| `JAILER_BIN` | Path to the jailer binary | Resolved from `PATH` |
+| `WARLOCK_DEV` | Set to `true` to skip all Firecracker/KVM/jailer checks | `false` |
+| `RUST_LOG` | Tracing filter directive (e.g. `debug`, `warlock=debug`) | `info` |
 
 ## Development
 
 ### Prerequisites
 
-- Rust v1.91
-- Firecracker and a compatible machine - See Firecracker's [getting started](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md)
-
-Warlock will attempt to find firecracker on the PATH of the host machine. If this is not found, or you wish to override it's location you can use the `FIRECRACKER_BIN` environment variable to define the location of the firecracker binary. Warlock must find a minimum compatible version of Firecracker (`>1.14.0`) for preflight checks to pass.
-
-The necessary KVM requirements will also be checked at start-up to ensure Firecracker will be able to create microvms.
-
-> [!TIP]
-> It is possible to bypass Firecracker and KVM checks with the `WARLOCK_DEV` environment variable. Naturally the use cases for this are limited since this is designed to work with Firecracker.
+- Rust v1.91+
+- Firecracker and a compatible machine (or `WARLOCK_DEV=true` for local development without Firecracker)
 
 ### Getting started
 
-1. Run the app:
+Run the app:
 
 ```bash
-`cargo run`
+cargo run
 ```
 
-or if you prefer Make:
+Or with Make:
 
 ```bash
 make start
 ```
 
-define the location of the Firecracker binary:
+For local development on macOS (where Firecracker is not available):
 
 ```bash
-FIRECRACKER_BIN="/apps/firecracker" cargo run
+WARLOCK_DEV=true cargo run
 ```
 
 ## Tests
-
-You can run the apps unit tests:
 
 ```bash
 cargo test
 ```
 
-or:
+Or:
 
 ```bash
 make test
 ```
 
+Tests always run in development mode (`WARLOCK_DEV=true` is set automatically).
+
 ## Deployment
 
-The [release](./.github/workflows/release.yml) workflow will run the application tests and build Warlock for Linux machines on the push of a new tag:
+The [release](./.github/workflows/release.yml) workflow builds Warlock for Linux x86_64 on tag push:
 
 ```bash
 git tag v0.1.0
@@ -61,49 +116,40 @@ git push origin v0.1.0
 ```
 
 The workflow can also be dispatched manually.
- 
+
 ## Installation
 
-The [install](./scripts/install.sh) can be used to download and install Warlock on a Linux machine:
+The [install script](scripts/install.sh) downloads the latest release and installs it to the system path:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TristanBlackwell/warlock/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/TristanBlackwell/warlock/master/scripts/install.sh | bash
 ```
 
-This will place Warlock on the device path.
+Then run:
 
 ```bash
 warlock
 ```
 
-You can also define variables as when running locally:
-
-```bash
-FIRECRACKER_BIN="./firecracker" warlock
-```
-
 ## Scripts
 
-There are a few utility scripts to help with development, testing, and deployment.
-
-### Install
-
-The [install.sh](./scripts/install.sh) will download the latest Warlock build from GitHub and install it onto the path of the machine.
-
-### Firecracker
-
-The [install-firecracker.sh](./scripts/install-firecracker.sh) installs the latest Firecracker binary as well as the getting started kernel image and rootfs.
+| Script | Description |
+|---|---|
+| [`install.sh`](scripts/install.sh) | Downloads and installs the latest Warlock binary |
+| [`install-firecracker.sh`](scripts/install-firecracker.sh) | Installs Firecracker, jailer, kernel, and rootfs; creates system user and directories |
+| [`setup-droplet.sh`](scripts/setup-droplet.sh) | Provisions a DigitalOcean Droplet with Firecracker and Warlock for testing |
 
 ### Droplet
 
-The [setup-droplet.sh](./scripts/setup-droplet.sh) will spin up a $6 / month Droplet on DigitalOcean, then install Firecracker and Warlock, essentially scaffolding a VM in preparation for testing.
+The setup script spins up a $6/month Droplet on DigitalOcean, then installs Firecracker and Warlock.
 
-There is a few prerequisites to this:
+Prerequisites:
 
-- `doctl` - Install the DigitalOcean CLI with `brew install doctl` (or the respective command for your system).
-- authenticate - Authenticate with DigitalOcean `doctl auth init`, you'll need a token with scopes `account:read`, `droplet:create`, `droplet:delete`, `ssh:create`.
-- SSH key - The script will create a local warlock SSH key (if one doesn't already exist) and upload this to DigitalOcean so the script (and you) can access the VM.
+- `doctl` -- Install with `brew install doctl` (or equivalent)
+- Authenticate with `doctl auth init` (scopes: `account:read`, `droplet:create`, `droplet:delete`, `ssh:create`)
+- An SSH key (the script creates one if needed)
 
-This can be ran via Make: `make droplet`.
-
-You can destroy the machine after creation with `Make droplet-destroy`.
+```bash
+make droplet          # create
+make droplet-destroy  # tear down
+```

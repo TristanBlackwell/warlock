@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get},
     Router,
 };
 use firecracker_rs_sdk::instance::Instance;
@@ -35,7 +35,7 @@ pub fn create_app(capacity: Capacity, jailer: JailerConfig) -> (Router, Arc<AppS
 
     let router = Router::new()
         .route("/internal/hc", get(handlers::healthcheck::healthcheck))
-        .route("/vm", post(handlers::vm::create))
+        .route("/vm", get(handlers::vm::list).post(handlers::vm::create))
         .route("/vm/{id}", get(handlers::vm::get))
         .route("/vm/{id}", delete(handlers::vm::delete))
         .layer(TraceLayer::new_for_http())
