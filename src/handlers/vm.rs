@@ -9,16 +9,17 @@ use axum::{
 };
 use firecracker_rs_sdk::{
     firecracker::FirecrackerOption,
+    instance::Instance,
     jailer::{ChrootStrategy, JailerOption},
     models::{
         BootSource, Drive, InstanceInfo, InstanceState, MachineConfiguration, NetworkInterface,
     },
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::app::{AppState, VmEntry};
+use crate::app::{AppState, VmEntry, VmResources};
 use crate::error::ApiError;
 use crate::firecracker::network::{add_nat_rules, create_tap, delete_tap, remove_nat_rules};
 use crate::firecracker::{JAILER_GID, JAILER_UID};
@@ -49,6 +50,7 @@ pub struct VmSummary {
     pub id: Uuid,
     pub vcpus: u8,
     pub memory_mb: u32,
+    pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<InstanceState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,20 +71,25 @@ pub async fn list(
     let mut summaries = Vec::with_capacity(vms.len());
 
     for (id, entry) in vms.iter_mut() {
-        let instance_state = match entry.instance.describe_instance().await {
-            Ok(info) => Some(info.state),
-            Err(e) => {
-                error!(vm_id = %id, error = ?e, "Failed to query VM state");
-                None
-            }
+        let instance_state = match entry {
+            VmEntry::Running { instance, .. } => match instance.describe_instance().await {
+                Ok(info) => Some(info.state),
+                Err(e) => {
+                    error!(vm_id = %id, error = ?e, "Failed to query VM state");
+                    None
+                }
+            },
+            VmEntry::Creating(_) => None,
         };
 
+        let r = entry.resources();
         summaries.push(VmSummary {
             id: *id,
-            vcpus: entry.vcpus,
-            memory_mb: entry.memory_mb,
+            vcpus: r.vcpus,
+            memory_mb: r.memory_mb,
+            status: entry.status(),
             state: instance_state,
-            guest_ip: entry.guest_ip.clone(),
+            guest_ip: r.guest_ip.clone(),
         });
     }
 
@@ -173,44 +180,154 @@ pub async fn create(
         }
     };
 
-    // Lock the VM map for the entire create operation to prevent race conditions
-    // on the capacity check.
-    let mut vms = state.vms.lock().await;
+    // ── Reserve capacity: insert placeholder ──
+    // Lock the VM map briefly to check capacity and insert a Creating
+    // placeholder. This reserves resources so concurrent creates can't
+    // overcommit, but releases the lock immediately so other handlers
+    // (list, get, delete) aren't blocked during the slow SDK setup.
+    let guest_ip = subnet.guest_ip.to_string();
 
-    // Check host capacity
-    let allocated_vcpus: u8 = vms.values().map(|e| e.vcpus).sum();
-    let allocated_memory: u64 = vms.values().map(|e| e.memory_mb as u64).sum();
+    {
+        let mut vms = state.vms.lock().await;
 
-    let available_vcpus = state.capacity.vcpus.saturating_sub(allocated_vcpus);
-    let available_memory = state
-        .capacity
-        .allocatable_memory_mb()
-        .saturating_sub(allocated_memory);
+        // Check host capacity (counts both Creating and Running entries)
+        let allocated_vcpus: u8 = vms.values().map(|e| e.resources().vcpus).sum();
+        let allocated_memory: u64 = vms.values().map(|e| e.resources().memory_mb as u64).sum();
 
-    if (vcpus as u64) > available_vcpus as u64 {
-        // Roll back networking
-        remove_nat_rules(&nat_handles);
-        delete_tap(&subnet.tap_name);
-        state.subnet_pool.lock().await.release(subnet.index);
-        return Err(ApiError::conflict(format!(
-            "Insufficient vCPUs: requested {} but only {} available",
-            vcpus, available_vcpus,
-        )));
-    }
+        let available_vcpus = state.capacity.vcpus.saturating_sub(allocated_vcpus);
+        let available_memory = state
+            .capacity
+            .allocatable_memory_mb()
+            .saturating_sub(allocated_memory);
 
-    if (memory_mb as u64) > available_memory {
-        // Roll back networking
-        remove_nat_rules(&nat_handles);
-        delete_tap(&subnet.tap_name);
-        state.subnet_pool.lock().await.release(subnet.index);
-        return Err(ApiError::conflict(format!(
-            "Insufficient memory: requested {} MB but only {} MB available",
-            memory_mb, available_memory,
-        )));
+        if (vcpus as u64) > available_vcpus as u64 {
+            // Roll back networking
+            remove_nat_rules(&nat_handles);
+            delete_tap(&subnet.tap_name);
+            state.subnet_pool.lock().await.release(subnet.index);
+            return Err(ApiError::conflict(format!(
+                "Insufficient vCPUs: requested {} but only {} available",
+                vcpus, available_vcpus,
+            )));
+        }
+
+        if (memory_mb as u64) > available_memory {
+            // Roll back networking
+            remove_nat_rules(&nat_handles);
+            delete_tap(&subnet.tap_name);
+            state.subnet_pool.lock().await.release(subnet.index);
+            return Err(ApiError::conflict(format!(
+                "Insufficient memory: requested {} MB but only {} MB available",
+                memory_mb, available_memory,
+            )));
+        }
+
+        // Insert Creating placeholder — reserves capacity in the map
+        vms.insert(
+            vm_id,
+            VmEntry::Creating(VmResources {
+                vcpus,
+                memory_mb,
+                rootfs_copy: Some(vm_rootfs.clone()),
+                tap_name: Some(subnet.tap_name.clone()),
+                subnet_index: Some(subnet.index),
+                nat_handles: Some(nat_handles),
+                guest_ip: Some(guest_ip.clone()),
+            }),
+        );
+
+        // Lock is released here
     }
 
     info!(vm_id = %vm_id, vcpus, memory_mb, "Creating VM instance");
 
+    // ── Panic guard ──
+    // If the handler panics during the SDK calls below, the CatchPanicLayer
+    // will catch it and return 500 — but the placeholder entry would remain
+    // in the map forever. This guard removes it on drop if not defused.
+    let mut guard = CreateGuard::new(state.clone(), vm_id);
+
+    // ── Firecracker setup (lock NOT held) ──
+    let instance_result = setup_firecracker_instance(
+        &state,
+        vm_id,
+        vcpus,
+        memory_mb,
+        &kernel,
+        &vm_rootfs,
+        &subnet.tap_name,
+        &subnet.guest_ip,
+        &subnet.tap_ip,
+    )
+    .await;
+
+    let (instance, desc) = match instance_result {
+        Ok(result) => result,
+        Err(e) => {
+            // Explicit cleanup: remove placeholder and roll back resources.
+            // We can use .await here (unlike Drop), so this is more reliable
+            // than the guard for normal error paths.
+            let mut vms = state.vms.lock().await;
+            if let Some(entry) = vms.remove(&vm_id) {
+                cleanup_vm_resources(&state, &vm_id, entry).await;
+            }
+            guard.defuse();
+            return Err(ApiError::from(e));
+        }
+    };
+
+    // ── Upgrade placeholder to Running ──
+    {
+        let mut vms = state.vms.lock().await;
+
+        // Extract the resources from the Creating placeholder
+        if let Some(VmEntry::Creating(resources)) = vms.remove(&vm_id) {
+            vms.insert(
+                vm_id,
+                VmEntry::Running {
+                    instance,
+                    resources,
+                },
+            );
+        }
+        // If the entry was somehow removed (shouldn't happen — delete
+        // rejects Creating VMs), the Instance is dropped here and the
+        // FStack cleans up the Firecracker process.
+    }
+
+    guard.defuse();
+
+    info!(vm_id = %vm_id, state = ?desc.state, guest_ip = %guest_ip, "VM instance started");
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CreateVmResponse {
+            id: vm_id,
+            vcpus,
+            memory_mb,
+            state: desc.state,
+            vmm_version: desc.vmm_version,
+            guest_ip,
+        }),
+    ))
+}
+
+/// Builds, configures, and starts a jailed Firecracker instance.
+///
+/// This is the slow part of VM creation — it spawns the jailer process,
+/// configures the VMM via the API socket, and starts the guest. It runs
+/// **without** holding the vms lock.
+async fn setup_firecracker_instance(
+    state: &Arc<AppState>,
+    vm_id: Uuid,
+    vcpus: u8,
+    memory_mb: u32,
+    kernel: &std::path::Path,
+    vm_rootfs: &std::path::Path,
+    tap_name: &str,
+    guest_ip: &std::net::Ipv4Addr,
+    tap_ip: &std::net::Ipv4Addr,
+) -> anyhow::Result<(Instance, InstanceInfo)> {
     // Configure Firecracker options (passed through to firecracker via jailer's --)
     let mut fc_opts = FirecrackerOption::new(&state.jailer.firecracker_path);
     fc_opts.log_path(Some("firecracker.log")).level("Info");
@@ -261,7 +378,7 @@ pub async fn create(
     // Guest Boot Source — the SDK hard-links the kernel into the chroot and
     // rewrites the path for Firecracker automatically.
     // Boot args include the kernel ip= parameter for automatic network config.
-    let network_boot_args = build_network_boot_args(&subnet.guest_ip, &subnet.tap_ip);
+    let network_boot_args = build_network_boot_args(guest_ip, tap_ip);
     let boot_args = format!(
         "console=ttyS0 reboot=k panic=1 pci=off {}",
         network_boot_args
@@ -271,7 +388,7 @@ pub async fn create(
         .put_guest_boot_source(&BootSource {
             boot_args: Some(boot_args),
             initrd_path: None,
-            kernel_image_path: kernel.clone(),
+            kernel_image_path: kernel.to_path_buf(),
         })
         .await?;
 
@@ -281,14 +398,14 @@ pub async fn create(
     instance
         .put_guest_network_interface_by_id(&NetworkInterface {
             iface_id: "eth0".into(),
-            host_dev_name: PathBuf::from(&subnet.tap_name),
+            host_dev_name: PathBuf::from(tap_name),
             guest_mac: None,
             rx_rate_limiter: None,
             tx_rate_limiter: None,
         })
         .await?;
 
-    debug!(vm_id = %vm_id, tap = %subnet.tap_name, "Network interface added");
+    debug!(vm_id = %vm_id, tap = tap_name, "Network interface added");
 
     // Guest Drives — each VM gets its own writable rootfs copy.
     instance
@@ -298,7 +415,7 @@ pub async fn create(
             is_root_device: true,
             cache_type: None,
             is_read_only: false,
-            path_on_host: vm_rootfs.clone(),
+            path_on_host: vm_rootfs.to_path_buf(),
             rate_limiter: None,
             io_engine: None,
             socket: None,
@@ -313,36 +430,7 @@ pub async fn create(
 
     let desc = instance.describe_instance().await?;
 
-    let guest_ip = subnet.guest_ip.to_string();
-
-    info!(vm_id = %vm_id, state = ?desc.state, guest_ip = %guest_ip, "VM instance started");
-
-    // Register the instance in state
-    vms.insert(
-        vm_id,
-        VmEntry {
-            instance,
-            vcpus,
-            memory_mb,
-            rootfs_copy: Some(vm_rootfs),
-            tap_name: Some(subnet.tap_name),
-            subnet_index: Some(subnet.index),
-            nat_handles: Some(nat_handles),
-            guest_ip: Some(guest_ip.clone()),
-        },
-    );
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(CreateVmResponse {
-            id: vm_id,
-            vcpus,
-            memory_mb,
-            state: desc.state,
-            vmm_version: desc.vmm_version,
-            guest_ip,
-        }),
-    ))
+    Ok((instance, desc))
 }
 
 pub async fn get(
@@ -355,9 +443,13 @@ pub async fn get(
         .get_mut(&id)
         .ok_or_else(|| ApiError::not_found("VM not found"))?;
 
-    let desc = entry.instance.describe_instance().await?;
-
-    Ok(Json(desc))
+    match entry {
+        VmEntry::Creating(_) => Err(ApiError::conflict("VM is still being created")),
+        VmEntry::Running { instance, .. } => {
+            let desc = instance.describe_instance().await?;
+            Ok(Json(desc))
+        }
+    }
 }
 
 pub async fn delete(
@@ -366,44 +458,156 @@ pub async fn delete(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut vms = state.vms.lock().await;
 
-    let mut entry = vms
+    let entry = vms
         .remove(&id)
         .ok_or_else(|| ApiError::not_found("VM not found"))?;
+
+    // Cannot delete a VM that is still being created — the create handler
+    // is in the middle of setting up the Firecracker instance without
+    // holding the lock. Put the entry back and tell the client to retry.
+    if matches!(&entry, VmEntry::Creating(_)) {
+        vms.insert(id, entry);
+        return Err(ApiError::conflict(
+            "VM is still being created, try again shortly",
+        ));
+    }
+
+    // We know it's Running — destructure to get the instance
+    let VmEntry::Running {
+        mut instance,
+        resources,
+    } = entry
+    else {
+        unreachable!();
+    };
 
     info!(vm_id = %id, "Stopping VM instance");
 
     // Attempt graceful shutdown via Ctrl+Alt+Del
-    if let Err(e) = entry.instance.stop().await {
+    if let Err(e) = instance.stop().await {
         error!(vm_id = %id, error = ?e, "Graceful stop failed, instance will be force-terminated on drop");
     }
 
-    // Capture cleanup info before dropping the entry
-    let rootfs_copy = entry.rootfs_copy.clone();
-    let tap_name = entry.tap_name.clone();
-    let nat_handles = entry.nat_handles;
-    let subnet_index = entry.subnet_index;
-
-    // Entry is dropped here — the SDK's FStack sends SIGTERM to the Firecracker
-    // process and cleans up the socket file and jailer workspace directory.
-    drop(entry);
+    // Instance is dropped here — the SDK's FStack sends SIGTERM to the
+    // Firecracker process and cleans up the socket file and jailer workspace.
+    drop(instance);
 
     // Clean up networking: tap device, NAT rules, subnet allocation
-    if let Some(ref name) = tap_name {
+    if let Some(ref name) = resources.tap_name {
         delete_tap(name);
     }
-    if let Some(ref handles) = nat_handles {
+    if let Some(ref handles) = resources.nat_handles {
         remove_nat_rules(handles);
     }
-    if let Some(index) = subnet_index {
+    if let Some(index) = resources.subnet_index {
         state.subnet_pool.lock().await.release(index);
     }
 
     // Clean up the per-VM rootfs copy (outside the jailer workspace)
-    if let Some(ref path) = rootfs_copy {
+    if let Some(ref path) = resources.rootfs_copy {
         cleanup_rootfs_copy(&id, path);
     }
 
     info!(vm_id = %id, "VM instance terminated and cleaned up");
 
     Ok(Json(serde_json::json!({ "id": id, "deleted": true })))
+}
+
+// ── Helpers ──
+
+/// Cleans up all resources associated with a VM entry (either Creating or
+/// Running). Used by the create handler's error path and the shutdown handler.
+async fn cleanup_vm_resources(state: &Arc<AppState>, vm_id: &Uuid, entry: VmEntry) {
+    let resources = match entry {
+        VmEntry::Running {
+            mut instance,
+            resources,
+        } => {
+            if let Err(e) = instance.stop().await {
+                error!(vm_id = %vm_id, error = ?e, "Graceful stop failed");
+            }
+            drop(instance);
+            resources
+        }
+        VmEntry::Creating(resources) => resources,
+    };
+
+    if let Some(ref name) = resources.tap_name {
+        delete_tap(name);
+    }
+    if let Some(ref handles) = resources.nat_handles {
+        remove_nat_rules(handles);
+    }
+    if let Some(index) = resources.subnet_index {
+        state.subnet_pool.lock().await.release(index);
+    }
+    if let Some(ref path) = resources.rootfs_copy {
+        cleanup_rootfs_copy(vm_id, path);
+    }
+}
+
+/// Ensures the `Creating` placeholder is removed from the VM map if the
+/// create handler panics between the two lock windows.
+///
+/// On normal error paths, the handler does explicit cleanup with `.await`
+/// (more reliable). This guard is a safety net for panics only, where we
+/// can't use async code (Drop is synchronous).
+struct CreateGuard {
+    state: Arc<AppState>,
+    vm_id: Uuid,
+    defused: bool,
+}
+
+impl CreateGuard {
+    fn new(state: Arc<AppState>, vm_id: Uuid) -> Self {
+        Self {
+            state,
+            vm_id,
+            defused: false,
+        }
+    }
+
+    /// Disarms the guard. Call this after successful upgrade to Running or
+    /// after explicit error cleanup.
+    fn defuse(&mut self) {
+        self.defused = true;
+    }
+}
+
+impl Drop for CreateGuard {
+    fn drop(&mut self) {
+        if self.defused {
+            return;
+        }
+
+        warn!(
+            vm_id = %self.vm_id,
+            "Create guard triggered — cleaning up placeholder entry (probable panic)"
+        );
+
+        // try_lock because Drop is sync and we can't .await. If the lock is
+        // contended (extremely unlikely during a panic), the placeholder
+        // persists until restart — orphan cleanup will catch it.
+        if let Ok(mut vms) = self.state.vms.try_lock() {
+            if let Some(VmEntry::Creating(resources)) = vms.get(&self.vm_id) {
+                // Best-effort cleanup of networking resources. Rootfs and
+                // jailer workspace will be caught by orphan cleanup on restart.
+                if let Some(ref name) = resources.tap_name {
+                    delete_tap(name);
+                }
+                if let Some(ref handles) = resources.nat_handles {
+                    remove_nat_rules(handles);
+                }
+                if let Some(index) = resources.subnet_index {
+                    if let Ok(mut pool) = self.state.subnet_pool.try_lock() {
+                        pool.release(index);
+                    }
+                }
+                if let Some(ref path) = resources.rootfs_copy {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            vms.remove(&self.vm_id);
+        }
+    }
 }

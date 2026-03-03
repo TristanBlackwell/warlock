@@ -43,39 +43,46 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to serve axum.")?;
 
-    // Server has stopped — clean up all running VMs
+    // Server has stopped — clean up all registered VMs
     let mut vms = state.vms.lock().await;
     let vm_count = vms.len();
 
     if vm_count > 0 {
-        info!("Shutting down {} running VM(s)...", vm_count);
+        info!("Shutting down {} VM(s)...", vm_count);
 
-        for (id, mut entry) in vms.drain() {
-            if let Err(e) = entry.instance.stop().await {
-                error!(vm_id = %id, error = ?e, "Graceful stop failed, force-terminating");
-            }
-
-            let rootfs_copy = entry.rootfs_copy.clone();
-            let tap_name = entry.tap_name.clone();
-            let nat_handles = entry.nat_handles;
-            let subnet_index = entry.subnet_index;
-
-            // Entry is dropped here — SIGTERM + socket + jailer workspace cleanup via FStack
-            drop(entry);
+        for (id, entry) in vms.drain() {
+            // Stop the Firecracker instance if it exists (Running state).
+            // Creating entries have no instance — they were mid-setup when
+            // shutdown was triggered. Their resources still need cleanup.
+            let resources = match entry {
+                app::VmEntry::Running {
+                    mut instance,
+                    resources,
+                } => {
+                    if let Err(e) = instance.stop().await {
+                        error!(vm_id = %id, error = ?e, "Graceful stop failed, force-terminating");
+                    }
+                    // Instance dropped here — FStack sends SIGTERM + cleans
+                    // up socket + jailer workspace
+                    drop(instance);
+                    resources
+                }
+                app::VmEntry::Creating(resources) => resources,
+            };
 
             // Clean up networking: tap device, NAT rules, subnet allocation
-            if let Some(ref name) = tap_name {
+            if let Some(ref name) = resources.tap_name {
                 firecracker::network::delete_tap(name);
             }
-            if let Some(ref handles) = nat_handles {
+            if let Some(ref handles) = resources.nat_handles {
                 firecracker::network::remove_nat_rules(handles);
             }
-            if let Some(index) = subnet_index {
+            if let Some(index) = resources.subnet_index {
                 state.subnet_pool.lock().await.release(index);
             }
 
             // Clean up the per-VM rootfs copy (outside the jailer workspace)
-            if let Some(ref path) = rootfs_copy {
+            if let Some(ref path) = resources.rootfs_copy {
                 if let Err(e) = std::fs::remove_file(path) {
                     error!(vm_id = %id, error = ?e, "Failed to remove rootfs copy");
                 }

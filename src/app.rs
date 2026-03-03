@@ -18,9 +18,8 @@ use crate::{
     vm::network::SubnetPool,
 };
 
-/// A running VM and the resources allocated to it.
-pub struct VmEntry {
-    pub instance: Instance,
+/// Resources allocated to a VM, shared across all lifecycle states.
+pub struct VmResources {
     pub vcpus: u8,
     pub memory_mb: u32,
     /// Path to the per-VM rootfs copy (cleaned up on delete/shutdown).
@@ -33,6 +32,38 @@ pub struct VmEntry {
     pub nat_handles: Option<NatHandles>,
     /// Guest IP address assigned to this VM.
     pub guest_ip: Option<String>,
+}
+
+/// A VM entry in the state map. The variant determines what operations
+/// are valid — the Firecracker `Instance` only exists in the `Running`
+/// state, enforced at the type level.
+pub enum VmEntry {
+    /// Resources are reserved and capacity is accounted for, but the
+    /// Firecracker instance is still being set up. The vms lock is NOT
+    /// held during this phase, allowing other handlers to proceed.
+    Creating(VmResources),
+    /// Firecracker instance is active and queryable.
+    Running {
+        instance: Instance,
+        resources: VmResources,
+    },
+}
+
+impl VmEntry {
+    /// Returns the status label for API responses.
+    pub fn status(&self) -> &'static str {
+        match self {
+            VmEntry::Creating(_) => "creating",
+            VmEntry::Running { .. } => "running",
+        }
+    }
+
+    /// Returns a reference to the VM's allocated resources.
+    pub fn resources(&self) -> &VmResources {
+        match self {
+            VmEntry::Creating(r) | VmEntry::Running { resources: r, .. } => r,
+        }
+    }
 }
 
 pub struct AppState {

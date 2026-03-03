@@ -47,8 +47,9 @@ pub async fn healthcheck(State(state): State<Arc<AppState>>) -> Json<HealthRespo
     // Try to get VM info, but don't fail the healthcheck if the lock is
     // contended (try_lock avoids blocking).
     let vms = state.vms.try_lock().ok().map(|vms| {
-        let allocated_vcpus: u8 = vms.values().map(|e| e.vcpus).sum();
-        let allocated_memory_mb: u64 = vms.values().map(|e| e.memory_mb as u64).sum();
+        let allocated_vcpus: u8 = vms.values().map(|e| e.resources().vcpus).sum();
+        let allocated_memory_mb: u64 =
+            vms.values().map(|e| e.resources().memory_mb as u64).sum();
         VmInfo {
             count: vms.len(),
             allocated_vcpus,
