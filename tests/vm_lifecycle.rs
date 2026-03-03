@@ -297,10 +297,10 @@ async fn create_vm_with_custom_config() {
     );
 }
 
-// ── Healthcheck with running VMs ──
+// ── Readiness probe with running VMs ──
 
 #[tokio::test]
-async fn healthcheck_reflects_allocated_resources() {
+async fn readiness_reflects_allocated_resources() {
     if !require_live() {
         eprintln!("skipped (WARLOCK_LIVE not set)");
         return;
@@ -308,31 +308,31 @@ async fn healthcheck_reflects_allocated_resources() {
 
     let addr = get_live_server_addr();
 
-    // Create a VM so the healthcheck has something to report
+    // Create a VM so the readiness probe has something to report
     let (_, create_body) = request("POST", &format!("http://{}/vm", addr), None).await;
 
     let vm_id = create_body["id"].as_str().unwrap_or("").to_string();
 
-    // Check healthcheck
-    let (hc_status, hc_body) =
-        request("GET", &format!("http://{}/internal/hc", addr), None).await;
+    // Check readiness probe
+    let (ready_status, ready_body) =
+        request("GET", &format!("http://{}/internal/ready", addr), None).await;
 
     // Clean up before asserting
     cleanup_vm(&addr, &vm_id).await;
 
-    assert_eq!(hc_status, 200);
-    assert_eq!(hc_body["status"], "healthy");
+    assert_eq!(ready_status, 200);
+    assert_eq!(ready_body["status"], "ready");
     assert!(
-        hc_body["vms"]["count"].as_u64().unwrap() >= 1,
-        "healthcheck should show at least 1 VM"
+        ready_body["vms"]["count"].as_u64().unwrap() >= 1,
+        "readiness probe should show at least 1 VM"
     );
     assert!(
-        hc_body["vms"]["allocated_vcpus"].as_u64().unwrap() >= 1,
-        "healthcheck should show allocated vCPUs"
+        ready_body["vms"]["allocated_vcpus"].as_u64().unwrap() >= 1,
+        "readiness probe should show allocated vCPUs"
     );
     assert!(
-        hc_body["vms"]["allocated_memory_mb"].as_u64().unwrap() >= 128,
-        "healthcheck should show allocated memory"
+        ready_body["vms"]["allocated_memory_mb"].as_u64().unwrap() >= 128,
+        "readiness probe should show allocated memory"
     );
 }
 

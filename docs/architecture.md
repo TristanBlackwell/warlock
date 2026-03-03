@@ -189,7 +189,7 @@ src/
   logging.rs           -- tracing init
   handlers/
     mod.rs             -- handler module exports
-    healthcheck.rs     -- enriched healthcheck (JSON)
+    healthcheck.rs     -- liveness (/internal/health) and readiness (/internal/ready) probes
     vm.rs              -- create/get/list/delete handlers
   firecracker/
     mod.rs             -- JailerConfig, CopyStrategy, constants
@@ -203,7 +203,7 @@ src/
     rootfs.rs          -- per-VM rootfs copy/cleanup
 tests/
   common/mod.rs        -- shared dev-mode test server + HTTP client
-  healthcheck.rs       -- healthcheck integration tests
+  healthcheck.rs       -- liveness and readiness probe integration tests
   vm.rs                -- VM API integration tests (dev mode)
   vm_lifecycle.rs      -- live integration tests (requires Firecracker)
 ```
@@ -218,7 +218,7 @@ Run everywhere (macOS, CI, provisioned hosts) via `cargo test`. The server start
 
 ### Tier 2: Live Tests
 
-Run only on hosts with Firecracker, KVM, and the full jailer layout via `make test-live`. Gated by the `WARLOCK_LIVE=true` environment variable. Covers the full VM lifecycle (create, get, list, delete), custom configurations, and healthcheck with running VMs.
+Run only on hosts with Firecracker, KVM, and the full jailer layout via `make test-live`. Gated by the `WARLOCK_LIVE=true` environment variable. Covers the full VM lifecycle (create, get, list, delete), custom configurations, and readiness probe with running VMs.
 
 ```sh
 # Fast tests (everywhere)

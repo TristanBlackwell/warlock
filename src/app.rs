@@ -82,7 +82,8 @@ pub fn create_app(capacity: Capacity, jailer: JailerConfig) -> (Router, Arc<AppS
     });
 
     let router = Router::new()
-        .route("/internal/hc", get(handlers::healthcheck::healthcheck))
+        .route("/internal/health", get(handlers::healthcheck::health))
+        .route("/internal/ready", get(handlers::healthcheck::ready))
         .route("/vm", get(handlers::vm::list).post(handlers::vm::create))
         .route("/vm/{id}", get(handlers::vm::get))
         .route("/vm/{id}", delete(handlers::vm::delete))

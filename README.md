@@ -10,7 +10,8 @@ All endpoints return JSON.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/internal/hc` | Healthcheck -- returns status, capacity, VM count, copy strategy |
+| `GET` | `/internal/health` | Liveness probe -- returns `{"status": "ok"}` |
+| `GET` | `/internal/ready` | Readiness probe -- returns status, capacity, VM count, copy strategy |
 | `POST` | `/vm` | Create a VM (202 Accepted) |
 | `GET` | `/vm` | List all VMs with state and resource allocation |
 | `GET` | `/vm/{id}` | Get a specific VM's state |
@@ -32,10 +33,18 @@ Both fields are optional. Defaults: 1 vCPU, 128 MB memory. Constraints: vCPUs mu
 curl http://localhost:3000/vm
 ```
 
-### Healthcheck
+### Liveness
 
 ```bash
-curl http://localhost:3000/internal/hc
+curl http://localhost:3000/internal/health
+```
+
+Minimal probe -- returns 200 if the process is alive.
+
+### Readiness
+
+```bash
+curl http://localhost:3000/internal/ready
 ```
 
 Returns capacity, running VM count, allocated resources, and the detected rootfs copy strategy.
