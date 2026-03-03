@@ -18,6 +18,10 @@ async fn main() -> anyhow::Result<()> {
     let jailer_config =
         firecracker::preflight_check().context("Firecracker pre-flight check failed")?;
 
+    // Clean sweep: kill orphaned VMs and remove stale resources from any
+    // previous Warlock instance that didn't shut down cleanly.
+    firecracker::orphan::cleanup_orphans(&jailer_config.vm_images_dir);
+
     let host_capacity = capacity::available_capacity()
         .context("Failed to read host capacity during initialisation")?;
 
