@@ -32,6 +32,11 @@ pub struct VmResources {
     pub nat_handles: Option<NatHandles>,
     /// Guest IP address assigned to this VM.
     pub guest_ip: Option<String>,
+    /// Path to the vsock Unix domain socket (for console access).
+    pub vsock_uds_path: Option<PathBuf>,
+    /// SSH public keys authorized to access this VM's console.
+    /// Each key is in OpenSSH authorized_keys format (e.g., "ssh-ed25519 AAAA...").
+    pub ssh_keys: Vec<String>,
 }
 
 /// A VM entry in the state map. The variant determines what operations

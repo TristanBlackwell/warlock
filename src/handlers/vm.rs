@@ -13,6 +13,7 @@ use firecracker_rs_sdk::{
     jailer::{ChrootStrategy, JailerOption},
     models::{
         BootSource, Drive, InstanceInfo, InstanceState, MachineConfiguration, NetworkInterface,
+        Vsock,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,11 @@ pub struct CreateVmRequest {
     pub vcpus: Option<u8>,
     /// Memory in megabytes. Must be at least 128.
     pub memory_mb: Option<u32>,
+    /// SSH public keys authorized to access this VM's console.
+    /// Each key must be in OpenSSH format (e.g., "ssh-ed25519 AAAA...").
+    /// If not provided, the VM will have no SSH access.
+    #[serde(default)]
+    pub ssh_keys: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +193,21 @@ pub async fn create(
     // (list, get, delete) aren't blocked during the slow SDK setup.
     let guest_ip = subnet.guest_ip.to_string();
 
+    // Build vsock UDS paths:
+    //  - placeholder_path: temporary file the SDK hard-links into the chroot
+    //  - runtime_path: where Firecracker actually creates the socket (inside the chroot)
+    //
+    // The SDK's NaiveLinkStrategy extracts the filename from the placeholder path,
+    // hard-links it into the jailer workspace dir, then passes the relative filename
+    // to Firecracker. Firecracker creates the real socket at that relative path
+    // inside its chroot.
+    let vsock_filename = format!("{}.sock", vm_id);
+    let vsock_placeholder_path = PathBuf::from("/srv/jailer/vsock").join(&vsock_filename);
+    let vsock_runtime_path = PathBuf::from(format!(
+        "/srv/jailer/firecracker/{}/root/{}",
+        vm_id, vsock_filename
+    ));
+
     {
         let mut vms = state.vms.lock().await;
 
@@ -222,7 +243,8 @@ pub async fn create(
             )));
         }
 
-        // Insert Creating placeholder — reserves capacity in the map
+        // Insert Creating placeholder — reserves capacity in the map.
+        // Store the runtime UDS path so the console handler can find the socket.
         vms.insert(
             vm_id,
             VmEntry::Creating(VmResources {
@@ -233,6 +255,8 @@ pub async fn create(
                 subnet_index: Some(subnet.index),
                 nat_handles: Some(nat_handles),
                 guest_ip: Some(guest_ip.clone()),
+                vsock_uds_path: Some(vsock_runtime_path),
+                ssh_keys: req.as_ref().map(|r| r.ssh_keys.clone()).unwrap_or_default(),
             }),
         );
 
@@ -258,6 +282,7 @@ pub async fn create(
         &subnet.tap_name,
         &subnet.guest_ip,
         &subnet.tap_ip,
+        &vsock_placeholder_path,
     )
     .await;
 
@@ -327,6 +352,7 @@ async fn setup_firecracker_instance(
     tap_name: &str,
     guest_ip: &std::net::Ipv4Addr,
     tap_ip: &std::net::Ipv4Addr,
+    vsock_placeholder_path: &std::path::Path,
 ) -> anyhow::Result<(Instance, InstanceInfo)> {
     // Configure Firecracker options (passed through to firecracker via jailer's --)
     let mut fc_opts = FirecrackerOption::new(&state.jailer.firecracker_path);
@@ -423,6 +449,30 @@ async fn setup_firecracker_instance(
         .await?;
 
     debug!(vm_id = %vm_id, "Guest drive added");
+
+    // Guest vsock device — enables host-to-guest communication for console access.
+    //
+    // The SDK's NaiveLinkStrategy computes a relative path from the UDS path we
+    // provide and sends it to Firecracker. Firecracker bind()s a Unix socket at
+    // that relative path inside its chroot. Unlike kernel/rootfs/drives, the vsock
+    // UDS is created by Firecracker at runtime, not a pre-existing file.
+    //
+    // With NaiveLinkStrategy, the SDK extracts the filename from vsock_placeholder_path
+    // and Firecracker creates the socket at: /srv/jailer/firecracker/{vm_id}/root/{vm_id}.sock
+    //
+    // Guest CID is derived from the VM ID, ensuring it's >= 3 (0-2 are reserved).
+    let guest_cid = (vm_id.as_u128() as u32 & 0x7FFFFFFF) | 0x00000003;
+
+    instance
+        .put_guest_vsock(&Vsock {
+            guest_cid,
+            uds_path: vsock_placeholder_path.to_path_buf(),
+            vsock_id: Some("vsock0".to_string()),
+        })
+        .await
+        .context("Failed to configure vsock device")?;
+
+    debug!(vm_id = %vm_id, guest_cid, "vsock device configured");
 
     // Start the instance. This returns as soon as Firecracker accepts the
     // action — the guest OS may still be booting, so we return 202 Accepted.

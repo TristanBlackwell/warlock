@@ -56,6 +56,9 @@ pub fn preflight_check() -> Result<JailerConfig> {
     // Check vm-images directory exists
     check_vm_images_dir()?;
 
+    // Check vsock directory exists
+    check_vsock_dir()?;
+
     // Detect cgroup version
     let cgroup_version = detect_cgroup_version();
     info!("Detected cgroup version: v{}", cgroup_version);
@@ -347,6 +350,27 @@ fn check_vm_images_dir() -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 fn check_vm_images_dir() -> Result<()> {
+    Ok(())
+}
+
+/// Verifies that the vsock directory exists for console UDS sockets.
+#[cfg(target_os = "linux")]
+fn check_vsock_dir() -> Result<()> {
+    use std::path::Path;
+
+    let dir = Path::new("/srv/jailer/vsock");
+    if !dir.exists() {
+        std::fs::create_dir_all(dir).context("Failed to create /srv/jailer/vsock directory")?;
+        info!("Created vsock directory: /srv/jailer/vsock");
+    } else {
+        info!("vsock directory exists: /srv/jailer/vsock");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_vsock_dir() -> Result<()> {
     Ok(())
 }
 

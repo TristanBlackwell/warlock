@@ -7,6 +7,7 @@ mod error;
 mod firecracker;
 mod handlers;
 mod logging;
+mod ssh;
 mod vm;
 
 #[tokio::main]
@@ -32,16 +33,31 @@ async fn main() -> anyhow::Result<()> {
 
     let (app, state) = app::create_app(host_capacity, jailer_config);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+    // HTTP server
+    let http_listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
-        .context("Unable to bind TCP listener.")?;
+        .context("Unable to bind HTTP listener.")?;
 
-    info!("Listening on {}", listener.local_addr()?);
+    info!("HTTP server listening on {}", http_listener.local_addr()?);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("Failed to serve axum.")?;
+    // SSH server
+    let ssh_server = ssh::WarlockSshServer::new(state.clone());
+    let ssh_port = 2222;
+
+    info!("SSH server listening on 0.0.0.0:{}", ssh_port);
+
+    // Run both servers concurrently
+    let http_task = axum::serve(http_listener, app).with_graceful_shutdown(shutdown_signal());
+    let ssh_task = ssh_server.run(ssh_port);
+
+    tokio::select! {
+        result = http_task => {
+            result.context("HTTP server failed")?;
+        }
+        result = ssh_task => {
+            result.context("SSH server failed")?;
+        }
+    }
 
     // Server has stopped — clean up all registered VMs
     let mut vms = state.vms.lock().await;

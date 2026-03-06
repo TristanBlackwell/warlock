@@ -23,7 +23,16 @@ ARCH="$(uname -m)"
 # ---------------------------------------------------------------------------
 
 TEMP_DIR=""
+WORK_DIR=""
+
 cleanup() {
+  # Unmount any bind mounts before cleanup
+  if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR/squashfs-root" ]; then
+    $SUDO umount "$WORK_DIR/squashfs-root/dev" 2>/dev/null || true
+    $SUDO umount "$WORK_DIR/squashfs-root/proc" 2>/dev/null || true
+    $SUDO umount "$WORK_DIR/squashfs-root/sys" 2>/dev/null || true
+  fi
+  
   if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
     rm -rf "$TEMP_DIR"
   fi
@@ -231,6 +240,58 @@ ssh-keygen -t rsa -f "${WORK_DIR}/id_rsa" -N "" -q
 # Ensure .ssh directory exists and patch in the public key
 $SUDO mkdir -p "${WORK_DIR}/squashfs-root/root/.ssh"
 $SUDO cp "${WORK_DIR}/id_rsa.pub" "${WORK_DIR}/squashfs-root/root/.ssh/authorized_keys"
+
+# Install socat for vsock console support
+info "Installing socat in guest image..."
+
+# Prepare chroot environment for apt
+$SUDO mkdir -p "${WORK_DIR}/squashfs-root/tmp"
+$SUDO chmod 1777 "${WORK_DIR}/squashfs-root/tmp"
+$SUDO mkdir -p "${WORK_DIR}/squashfs-root/var/cache/apt/archives/partial"
+$SUDO mkdir -p "${WORK_DIR}/squashfs-root/var/lib/apt/lists/partial"
+$SUDO mkdir -p "${WORK_DIR}/squashfs-root/var/log/apt"
+
+# Mount necessary filesystems for chroot environment
+$SUDO mount --bind /dev "${WORK_DIR}/squashfs-root/dev"
+$SUDO mount --bind /proc "${WORK_DIR}/squashfs-root/proc"
+$SUDO mount --bind /sys "${WORK_DIR}/squashfs-root/sys"
+
+# Copy resolv.conf for DNS resolution
+$SUDO cp /etc/resolv.conf "${WORK_DIR}/squashfs-root/etc/resolv.conf"
+
+# Install socat (disable GPG checks since we're in a temporary chroot)
+$SUDO chroot "${WORK_DIR}/squashfs-root" /bin/bash -c "
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq --allow-insecure-repositories
+  apt-get install -y -qq --allow-unauthenticated socat
+"
+
+# Unmount filesystems
+$SUDO umount "${WORK_DIR}/squashfs-root/dev" || true
+$SUDO umount "${WORK_DIR}/squashfs-root/proc" || true
+$SUDO umount "${WORK_DIR}/squashfs-root/sys" || true
+
+# Create systemd unit for vsock console listener
+info "Creating vsock console systemd unit..."
+$SUDO tee "${WORK_DIR}/squashfs-root/etc/systemd/system/vsock-console.service" >/dev/null <<'EOF'
+[Unit]
+Description=vsock console listener
+After=network.target
+
+[Service]
+Type=simple
+Environment="TERM=xterm-256color"
+ExecStart=/usr/bin/socat VSOCK-LISTEN:1024,fork,reuseaddr EXEC:"/bin/login -p",pty,stderr,setsid,sigint,sane
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable the vsock console service
+info "Enabling vsock console service..."
+$SUDO chroot "${WORK_DIR}/squashfs-root" systemctl enable vsock-console.service >/dev/null 2>&1
 
 # Create ext4 filesystem image
 ROOTFS_NAME="ubuntu-${UBUNTU_VERSION}.ext4"
