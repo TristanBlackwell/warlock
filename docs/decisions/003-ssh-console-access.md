@@ -1,6 +1,6 @@
 # ADR-003: SSH Console Access via virtio-vsock
 
-**Status:** Ready  
+**Status:** Accepted  
 **Date:** 2026-03-06  
 **Context:** Interactive terminal access to Firecracker microVMs without guest network exposure
 
@@ -45,7 +45,7 @@ PTY + /bin/login
 2. **Port:** 2222 (non-privileged, no conflict with host SSH)
 3. **Authentication:** Public key, per-VM authorized keys
 4. **Username Format:** `vm-{uuid}@host` (VM ID encoded in username)
-5. **Host Key:** Ephemeral Ed25519 key (generated on startup, not persisted)
+5. **Host Key:** Persistent Ed25519 key at `/etc/warlock/ssh/ssh_host_ed25519_key`
 6. **Guest Listener:** socat with vsock + PTY + /bin/login
 
 ### API Design
@@ -79,8 +79,9 @@ ssh vm-abc-123-def-456@warlock.example.com -p 2222
 **SSH Server** (`src/ssh/server.rs`):
 - Listens on `0.0.0.0:2222` (all interfaces)
 - Uses russh library (pure Rust, async/await)
-- Generates ephemeral Ed25519 host key on startup
-- **Note:** Key not persisted - causes SSH "host key changed" warnings on restart
+- Loads persistent Ed25519 host key from `/etc/warlock/ssh/ssh_host_ed25519_key`
+- Generates and saves new key on first start if missing
+- Gracefully falls back to ephemeral key if unable to save (permission issues)
 
 **Session Handler** (`src/ssh/session.rs`):
 - Parses username to extract VM UUID
@@ -97,6 +98,13 @@ ssh vm-abc-123-def-456@warlock.example.com -p 2222
 - Supports Ed25519, RSA, and EC keys
 - Skips comments and empty lines
 - Returns true only if key matches exactly
+
+**Host Key Module** (`src/ssh/host_key.rs`):
+- Loads existing host key from disk if present
+- Generates new Ed25519 key on first start
+- Saves key in OpenSSH format with proper permissions (0600/0644)
+- Also saves public key (.pub) for user convenience
+- Graceful fallback to ephemeral key if filesystem is read-only
 
 **Guest Listener** (systemd service `vsock-console.service`):
 ```ini
@@ -126,14 +134,13 @@ pub struct VmResources {
 
 ### Directory Structure
 
-**Current:** No persistent files (ephemeral host key)
-
-**Future:** Persistent host key storage
 ```
 /etc/warlock/ssh/
-  ssh_host_ed25519_key      # Persistent Ed25519 host key
-  ssh_host_ed25519_key.pub  # Public component
+  ssh_host_ed25519_key      # Persistent Ed25519 host key (0600 permissions)
+  ssh_host_ed25519_key.pub  # Public component (0644 permissions)
 ```
+
+Created automatically on first start. If directory cannot be created (permission denied), server falls back to ephemeral key with warning.
 
 ## External Access
 
@@ -257,29 +264,27 @@ Serve terminal emulator in browser via WebSocket.
 **Implemented:**
 - ✅ **SSH key validation** - Validates against per-VM authorized keys
 - ✅ **Per-VM authorized keys** - Stored in `VmResources.ssh_keys`
+- ✅ **Persistent host key** - Saved to `/etc/warlock/ssh/`, prevents fingerprint changes
 - ✅ SSH server binds to all interfaces (external access ready)
 - ✅ PTY allocation and terminal resize
 - ✅ Bidirectional I/O proxy
 - ✅ Multiple concurrent sessions
-- ⚠️ Ephemeral host key (generates on startup, not persisted)
 
 **Not Implemented (Security Gaps):**
 - ❌ HTTP API authentication - Anyone can create VMs
 - ❌ Session recording
 - ❌ Rate limiting
 - ❌ Audit logging
-- ⚠️ Persistent host key - Causes "host key changed" warnings on restart
 
 ### Production Requirements
 
 Before exposing to public internet:
 
 1. **Add HTTP API authentication** (OAuth, JWT, API keys) - High priority
-2. **Persistent host key** - Prevents SSH fingerprint warnings on restart
-3. **Session recording** for compliance and debugging
-4. **Rate limiting** (connections per IP, per VM)
-5. **Audit logging** (who connected, when, to which VM)
-6. **Fail2ban integration** (optional - auto-block brute force attempts)
+2. **Session recording** for compliance and debugging
+3. **Rate limiting** (connections per IP, per VM)
+4. **Audit logging** (who connected, when, to which VM)
+5. **Fail2ban integration** (optional - auto-block brute force attempts)
 
 ## Security Considerations
 
@@ -288,7 +293,7 @@ Before exposing to public internet:
 | Threat | Mitigation (Current) | Mitigation (Required) |
 |--------|---------------------|----------------------|
 | Unauthorized VM access | ✅ Per-VM SSH key validation | ✅ Already implemented |
-| MITM attack | ⚠️ Ephemeral host key (changes on restart) | ✅ Implement persistent host key |
+| MITM attack | ✅ Persistent host key | ✅ Already implemented |
 | Brute force | ✅ Public key auth only | ⚠️ Optional: rate limiting |
 | VM creation abuse | ❌ No API auth | ✅ Add HTTP authentication |
 | Session replay | ❌ No recording | ⚠️ Optional (compliance-dependent) |
@@ -300,19 +305,18 @@ Before exposing to public internet:
 - Current implementation is suitable for trusted environments
 - SSH encryption provides transport security
 - Per-VM SSH key validation provides access control
+- Persistent host key prevents fingerprint warnings
 - No sensitive data in prototype deployments
-- Ephemeral host key is inconvenient but not a security risk
 
-**Current Status (SSH Key Validation Implemented):**
-- SSH key validation is functional and tested
-- Per-VM authorized keys provide access control
-- Suitable for trusted networks and development
-- Still requires HTTP API authentication for production
-- Ephemeral host key causes UX friction (fingerprint warnings) but does not impact security
+**Current Status:**
+- ✅ SSH key validation is functional and tested
+- ✅ Per-VM authorized keys provide access control
+- ✅ Persistent host key prevents UX issues
+- ✅ Suitable for trusted networks and development
+- ⚠️ Still requires HTTP API authentication for production
 
 **Not Acceptable for Production:**
 - Must add HTTP API authentication before public internet exposure
-- Should implement persistent host key for better UX
 - Recommend session recording for compliance
 - Recommend rate limiting for DoS protection
 
@@ -330,17 +334,25 @@ Current implementation is sufficient for:
 Before production deployment:
 
 1. **Add HTTP API authentication** - Prevent unauthorized VM creation (top priority)
-2. **Implement persistent host key** - Better UX, prevents fingerprint warnings
-3. **Configure firewall rules** - Only allow necessary ports (3000, 2222)
-4. **Monitor auth failures** - Set up alerts for suspicious activity
-5. **Consider rate limiting** - Protect against abuse
-6. **Optional: Session recording** - For compliance and auditing
+2. **Configure firewall rules** - Only allow necessary ports (3000, 2222)
+3. **Monitor auth failures** - Set up alerts for suspicious activity
+4. **Consider rate limiting** - Protect against abuse
+5. **Optional: Session recording** - For compliance and auditing
+6. **Backup host key** - Store `/etc/warlock/ssh/ssh_host_ed25519_key` securely
 
 ### Filesystem Requirements
 
-**Current:** No filesystem requirements (ephemeral key)
+**Directory:** `/etc/warlock/ssh/` (created automatically on first start)
 
-**Future (Persistent Host Key):**
-- Directory: `/etc/warlock/ssh/` (will be created automatically)
-- Permissions: 600 on private key, 644 on public key
-- Backup recommended: Store private key in secure location to prevent fingerprint changes on host rebuild
+**Files:**
+- `ssh_host_ed25519_key` - Private key (0600 permissions)
+- `ssh_host_ed25519_key.pub` - Public key (0644 permissions)
+
+**Permissions:**
+- Directory must be writable by Warlock process (typically run as root)
+- If directory cannot be created, server falls back to ephemeral key with warning
+
+**Backup Recommendation:**
+- Store private key in secure location (e.g., secrets manager)
+- Prevents fingerprint changes if host is rebuilt
+- Required for infrastructure-as-code deployments

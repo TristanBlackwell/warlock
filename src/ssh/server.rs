@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use russh::server::{Config, Server};
-use russh_keys::key::KeyPair;
 use std::sync::Arc;
 use tracing::info;
 
 use crate::app::AppState;
+use crate::ssh::host_key::load_or_generate_host_key;
 use crate::ssh::session::SessionHandler;
 
 /// Warlock SSH server for VM console access.
@@ -20,14 +20,9 @@ impl WarlockSshServer {
     /// Run the SSH server on the specified port.
     pub async fn run(mut self, port: u16) -> Result<()> {
         // Load or generate persistent SSH host key
-        // For now, we'll generate a new key each time. In production, this should
-        // be persisted to disk to avoid "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"
-        // errors when the server restarts.
-        // TODO: Implement proper key persistence once we determine the correct russh_keys API
-        let host_key = KeyPair::generate_ed25519()
-            .ok_or_else(|| anyhow::anyhow!("Failed to generate SSH host key"))?;
-        
-        info!("Generated ephemeral SSH host key (TODO: persist to disk)");
+        // If the key cannot be saved (e.g., permission denied), a warning is logged
+        // and the server continues with an ephemeral key.
+        let host_key = load_or_generate_host_key(None)?;
 
         let config = Config {
             inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
