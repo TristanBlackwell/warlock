@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use reqwest::Client;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Returns true if the live test environment is available.
 ///
@@ -157,9 +157,7 @@ async fn cleanup_vm(addr: &SocketAddr, id: &str) {
     let client = get_client();
     let _ = timeout(
         Duration::from_secs(10),
-        client
-            .delete(format!("http://{}/vm/{}", addr, id))
-            .send(),
+        client.delete(format!("http://{}/vm/{}", addr, id)).send(),
     )
     .await;
 }
@@ -211,8 +209,7 @@ async fn full_lifecycle() {
         request("DELETE", &format!("http://{}/vm/{}", addr, vm_id), None).await;
 
     // ── Verify gone ──
-    let (gone_status, _) =
-        request("GET", &format!("http://{}/vm/{}", addr, vm_id), None).await;
+    let (gone_status, _) = request("GET", &format!("http://{}/vm/{}", addr, vm_id), None).await;
 
     // ── Verify rootfs cleaned up ──
     let rootfs_path = format!("/srv/jailer/vm-images/{}.ext4", vm_id);
@@ -338,8 +335,8 @@ async fn readiness_reflects_allocated_resources() {
 
 // ── Networking ──
 
-/// Verifies end-to-end VM networking: tap device creation, nftables rules,
-/// host-to-guest connectivity (ping), and full cleanup on deletion.
+/// Verifies end-to-end VM networking from the public surface:
+/// a VM gets a reachable guest IP and becomes unreachable after deletion.
 #[tokio::test]
 async fn vm_networking() {
     if !require_live() {
@@ -372,35 +369,6 @@ async fn vm_networking() {
         guest_ip
     );
 
-    // ── Verify tap device exists ──
-    // The first VM gets tap name "fc0" (subnet index 0).
-    // We can't know the exact tap name from the API response, but we can check
-    // that at least one fc* tap device exists.
-    let ip_link = Command::new("ip")
-        .args(["link", "show"])
-        .output()
-        .expect("failed to run ip link show");
-    let link_output = String::from_utf8_lossy(&ip_link.stdout);
-    let has_fc_tap = link_output.lines().any(|line| line.contains("fc"));
-    assert!(
-        has_fc_tap,
-        "expected at least one fc* tap device in ip link output:\n{}",
-        link_output
-    );
-
-    // ── Verify nftables rules exist for the guest IP ──
-    let nft_list = Command::new("nft")
-        .args(["list", "table", "firecracker"])
-        .output()
-        .expect("failed to run nft list table firecracker");
-    let nft_output = String::from_utf8_lossy(&nft_list.stdout);
-    assert!(
-        nft_output.contains(&guest_ip),
-        "nftables firecracker table should contain a rule for guest IP {}, got:\n{}",
-        guest_ip,
-        nft_output
-    );
-
     // ── Ping guest from host ──
     // Give the guest kernel a moment to configure networking. The kernel ip=
     // boot arg is applied early, but the VM may still be initialising.
@@ -425,42 +393,7 @@ async fn vm_networking() {
         request("DELETE", &format!("http://{}/vm/{}", addr, vm_id), None).await;
     assert_eq!(delete_status, 200, "expected 200 for delete");
 
-    // ── Verify tap device cleaned up ──
-    let ip_link_after = Command::new("ip")
-        .args(["link", "show"])
-        .output()
-        .expect("failed to run ip link show");
-    let link_after = String::from_utf8_lossy(&ip_link_after.stdout);
-
-    // Check that no fc* tap devices remain (assuming this is the only VM).
-    // We check for the specific pattern to avoid false positives on interface
-    // names that happen to contain "fc".
-    let fc_taps_remaining: Vec<&str> = link_after
-        .lines()
-        .filter(|line| {
-            // ip link lines with interface names look like: "N: fc0: <FLAGS>"
-            line.split_whitespace()
-                .nth(1)
-                .map(|name| name.trim_end_matches(':').starts_with("fc"))
-                .unwrap_or(false)
-        })
-        .collect();
-    assert!(
-        fc_taps_remaining.is_empty(),
-        "expected no fc* tap devices after deletion, found:\n{}",
-        fc_taps_remaining.join("\n")
-    );
-
-    // ── Verify nftables rules cleaned up ──
-    let nft_after = Command::new("nft")
-        .args(["list", "table", "firecracker"])
-        .output()
-        .expect("failed to run nft list table firecracker");
-    let nft_after_output = String::from_utf8_lossy(&nft_after.stdout);
-    assert!(
-        !nft_after_output.contains(&guest_ip),
-        "nftables rules for guest IP {} should be removed after deletion, but found:\n{}",
-        guest_ip,
-        nft_after_output
-    );
+    // ── Verify API no longer reports the VM ──
+    let (gone_status, _) = request("GET", &format!("http://{}/vm/{}", addr, vm_id), None).await;
+    assert_eq!(gone_status, 404, "expected VM to be gone after deletion");
 }

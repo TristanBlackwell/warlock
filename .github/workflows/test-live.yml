@@ -56,4 +56,4 @@ jobs:
       # bind mounts inside its chroot. On provisioned hosts these tests are
       # also run as root.
       - name: Run live tests
-        run: sudo -E env "PATH=$PATH" WARLOCK_LIVE=true cargo test --test vm_lifecycle --verbose -- --nocapture
+        run: sudo -E env "PATH=$PATH" WARLOCK_LIVE=true cargo test --test vm_lifecycle --verbose -- --nocapture --test-threads=1

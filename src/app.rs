@@ -1,10 +1,10 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::{
+    Json, Router,
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get},
-    Json, Router,
 };
 use firecracker_rs_sdk::instance::Instance;
 use tokio::sync::Mutex;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     capacity::Capacity,
-    firecracker::{network::NatHandles, JailerConfig},
+    firecracker::{JailerConfig, network::NatHandles},
     handlers,
     vm::network::SubnetPool,
 };

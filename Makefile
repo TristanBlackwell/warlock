@@ -8,7 +8,7 @@ test:
 	cargo test
 
 test-live:
-	WARLOCK_LIVE=true cargo test --test vm_lifecycle -- --nocapture
+	WARLOCK_LIVE=true cargo test --test vm_lifecycle -- --nocapture --test-threads=1
 
 droplet:
 	./scripts/setup-droplet.sh

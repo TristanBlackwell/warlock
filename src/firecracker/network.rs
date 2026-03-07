@@ -236,17 +236,21 @@ fn run_cmd_output(program: &str, args: &[&str]) -> anyhow::Result<String> {
 ///
 /// The output contains a line like: `... # handle 42`
 fn parse_nft_handle(output: &str) -> anyhow::Result<u64> {
-    // Look for "# handle <N>" anywhere in the output
+    // Look for "# handle <N>" anywhere in the output.
+    // If multiple handles are present, use the last one.
+    let mut last_handle = None;
+
     for line in output.lines() {
         if let Some(pos) = line.find("# handle ") {
             let handle_str = line[pos + 9..].trim();
-            return handle_str
+            let handle = handle_str
                 .parse::<u64>()
                 .with_context(|| format!("Failed to parse nft handle from: {}", handle_str));
+            last_handle = Some(handle?);
         }
     }
 
-    bail!("No handle found in nft output: {}", output.trim());
+    last_handle.ok_or_else(|| anyhow::anyhow!("No handle found in nft output: {}", output.trim()))
 }
 
 #[cfg(test)]
@@ -262,8 +266,7 @@ mod tests {
     #[test]
     fn parse_nft_handle_multiline() {
         let output = "table firecracker {\n  chain postrouting {\n    # handle 7\n  }\n}\nadd rule ... # handle 99\n";
-        // Should find the last "# handle" — but our impl finds the first
-        assert_eq!(parse_nft_handle(output).unwrap(), 7);
+        assert_eq!(parse_nft_handle(output).unwrap(), 99);
     }
 
     #[test]

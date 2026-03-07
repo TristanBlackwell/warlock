@@ -1,7 +1,14 @@
 mod common;
 
-use tokio::time::{timeout, Duration};
+use std::path::PathBuf;
+
+use tokio::time::{Duration, timeout};
 use uuid::Uuid;
+use warlock::{
+    app::{self, VmEntry, VmResources},
+    capacity::Capacity,
+    firecracker::{CopyStrategy, JailerConfig},
+};
 
 /// Helper: send a request and return (status_code, parsed JSON body).
 async fn request(
@@ -32,6 +39,41 @@ async fn request(
     let status = response.status().as_u16();
     let json = response.json().await.expect("failed to parse JSON");
     (status, json)
+}
+
+/// Start an isolated in-process app instance for state-driven handler tests.
+async fn spawn_isolated_server() -> (std::net::SocketAddr, std::sync::Arc<app::AppState>) {
+    let capacity = Capacity {
+        memory_mb: 4096,
+        vcpus: 8,
+    };
+
+    let jailer = JailerConfig {
+        cgroup_version: 2,
+        firecracker_path: PathBuf::from("firecracker"),
+        jailer_path: PathBuf::from("jailer"),
+        kernel_path: PathBuf::from("/tmp/fake-kernel"),
+        rootfs_path: PathBuf::from("/tmp/fake-rootfs"),
+        vm_images_dir: PathBuf::from("/tmp/fake-vm-images"),
+        copy_strategy: CopyStrategy::Sparse,
+        host_interface: "eth0".into(),
+    };
+
+    let (app, state) = app::create_app(capacity, jailer);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind isolated test listener");
+    let addr = listener
+        .local_addr()
+        .expect("failed to get isolated test listener addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("isolated test server failed");
+    });
+
+    (addr, state)
 }
 
 // ── List ──
@@ -126,7 +168,78 @@ async fn delete_nonexistent_vm_returns_404() {
     assert_eq!(body["error"], "VM not found");
 }
 
-// ── Bad path parameter (400) ──
+#[tokio::test]
+async fn unknown_route_returns_not_found_json() {
+    let addr = common::get_server_addr();
+    let (status, body) = request("GET", &format!("http://{}/does-not-exist", addr), None).await;
+
+    assert_eq!(status, 404);
+    assert_eq!(body["error"], "Not found");
+}
+
+#[tokio::test]
+async fn get_vm_in_creating_state_returns_409() {
+    let (addr, state) = spawn_isolated_server().await;
+    let vm_id = Uuid::new_v4();
+
+    {
+        let mut vms = state.vms.lock().await;
+        vms.insert(
+            vm_id,
+            VmEntry::Creating(VmResources {
+                vcpus: 1,
+                memory_mb: 128,
+                rootfs_copy: None,
+                tap_name: None,
+                subnet_index: None,
+                nat_handles: None,
+                guest_ip: None,
+                vsock_uds_path: None,
+                ssh_keys: vec![],
+            }),
+        );
+    }
+
+    let (status, body) = request("GET", &format!("http://{}/vm/{}", addr, vm_id), None).await;
+
+    assert_eq!(status, 409);
+    assert_eq!(body["error"], "VM is still being created");
+}
+
+#[tokio::test]
+async fn delete_vm_in_creating_state_returns_409_and_preserves_entry() {
+    let (addr, state) = spawn_isolated_server().await;
+    let vm_id = Uuid::new_v4();
+
+    {
+        let mut vms = state.vms.lock().await;
+        vms.insert(
+            vm_id,
+            VmEntry::Creating(VmResources {
+                vcpus: 1,
+                memory_mb: 128,
+                rootfs_copy: None,
+                tap_name: None,
+                subnet_index: None,
+                nat_handles: None,
+                guest_ip: None,
+                vsock_uds_path: None,
+                ssh_keys: vec![],
+            }),
+        );
+    }
+
+    let (status, body) = request("DELETE", &format!("http://{}/vm/{}", addr, vm_id), None).await;
+
+    assert_eq!(status, 409);
+    assert_eq!(
+        body["error"],
+        "VM is still being created, try again shortly"
+    );
+
+    let vms = state.vms.lock().await;
+    assert!(vms.contains_key(&vm_id));
+}
 
 #[tokio::test]
 async fn get_vm_with_invalid_uuid_returns_400() {
@@ -135,9 +248,7 @@ async fn get_vm_with_invalid_uuid_returns_400() {
 
     let response = timeout(
         Duration::from_secs(5),
-        client
-            .get(format!("http://{}/vm/not-a-uuid", addr))
-            .send(),
+        client.get(format!("http://{}/vm/not-a-uuid", addr)).send(),
     )
     .await
     .expect("request timed out")
@@ -167,10 +278,7 @@ async fn delete_vm_with_invalid_uuid_returns_400() {
 // ── Create with valid config but no Firecracker (500) ──
 
 #[tokio::test]
-async fn create_vm_with_valid_config_returns_500_in_dev_mode() {
-    // In dev mode, validation passes but canonicalize("/opt/firecracker/vmlinux")
-    // fails because the path doesn't exist. The error goes through
-    // From<anyhow::Error> so the client sees a generic message.
+async fn create_vm_with_valid_config_returns_obfuscated_internal_error() {
     let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",
@@ -184,9 +292,7 @@ async fn create_vm_with_valid_config_returns_500_in_dev_mode() {
 }
 
 #[tokio::test]
-async fn create_vm_with_empty_body_returns_500_in_dev_mode() {
-    // Empty JSON body means defaults (1 vCPU, 128 MB) — validation passes, but
-    // filesystem operations fail in dev mode. Same obfuscation applies.
+async fn create_vm_with_empty_body_returns_obfuscated_internal_error() {
     let addr = common::get_server_addr();
     let (status, body) = request(
         "POST",

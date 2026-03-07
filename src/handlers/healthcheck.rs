@@ -70,8 +70,7 @@ pub async fn ready(State(state): State<Arc<AppState>>) -> Json<ReadyResponse> {
     // is contended (try_lock avoids blocking).
     let vms = state.vms.try_lock().ok().map(|vms| {
         let allocated_vcpus: u8 = vms.values().map(|e| e.resources().vcpus).sum();
-        let allocated_memory_mb: u64 =
-            vms.values().map(|e| e.resources().memory_mb as u64).sum();
+        let allocated_memory_mb: u64 = vms.values().map(|e| e.resources().memory_mb as u64).sum();
         VmInfo {
             count: vms.len(),
             allocated_vcpus,

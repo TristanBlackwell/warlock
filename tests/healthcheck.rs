@@ -1,6 +1,6 @@
 mod common;
 
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 #[tokio::test]
 async fn liveness_returns_200_with_ok_status() {
@@ -35,9 +35,7 @@ async fn readiness_returns_200_with_enriched_json() {
 
     let response = timeout(
         Duration::from_secs(5),
-        client
-            .get(format!("http://{}/internal/ready", addr))
-            .send(),
+        client.get(format!("http://{}/internal/ready", addr)).send(),
     )
     .await
     .expect("request timed out")
@@ -53,5 +51,8 @@ async fn readiness_returns_200_with_enriched_json() {
     assert!(body["capacity"]["total_vcpus"].as_u64().unwrap() > 0);
     assert!(body["capacity"]["total_memory_mb"].as_u64().unwrap() > 0);
     assert_eq!(body["vms"]["count"], 0);
-    assert_eq!(body["copy_strategy"], "sparse"); // dev mode defaults to sparse
+    let copy_strategy = body["copy_strategy"]
+        .as_str()
+        .expect("copy_strategy should be a string");
+    assert!(matches!(copy_strategy, "sparse" | "reflink"));
 }

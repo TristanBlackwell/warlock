@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec};
@@ -37,11 +37,7 @@ impl SessionHandler {
 impl Handler for SessionHandler {
     type Error = anyhow::Error;
 
-    async fn auth_publickey(
-        &mut self,
-        user: &str,
-        key: &PublicKey,
-    ) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         debug!(username = user, "SSH auth attempt with public key");
 
         // Parse username to get VM ID
@@ -187,11 +183,11 @@ impl Handler for SessionHandler {
 
         // Split the stream
         let (mut read_half, mut write_half) = tokio::io::split(uds_stream);
-        
+
         // Create channel for sending data to UDS
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.uds_writer = Some(tx);
-        
+
         // Spawn task to forward SSH → UDS
         tokio::spawn(async move {
             while let Some(data) = rx.recv().await {
@@ -256,11 +252,7 @@ impl Handler for SessionHandler {
         _pix_height: u32,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        debug!(
-            cols = col_width,
-            rows = row_height,
-            "Window change request"
-        );
+        debug!(cols = col_width, rows = row_height, "Window change request");
 
         // Send terminal resize escape sequence to guest
         // Format: ESC[8;<height>;<width>t
