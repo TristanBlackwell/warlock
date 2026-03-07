@@ -149,17 +149,37 @@ jobs:
           body: |
             ## Installation
 
-            ### Setup script (latest version)
+            ### Prerequisites
+
+            **Firecracker setup (recommended):**
+
+            Warlock requires Firecracker to be installed in a specific way to work correctly. Use the provided installation script:
+
+            ```bash
+            sudo bash <(curl -fsSL https://raw.githubusercontent.com/TristanBlackwell/warlock/master/scripts/install-firecracker.sh)
+            ```
+
+            This script automatically:
+            - Installs the latest Firecracker binary and jailer
+            - Downloads and prepares a kernel image and Ubuntu rootfs
+            - Configures networking (nftables, IPv4 forwarding)
+            - Sets up the firecracker system user and jailer directories
+            - Generates SSH keys for VM guest access
+
+            ### Install Warlock
+
+            **Quick setup (recommended):**
 
             ```bash
             curl -fsSL https://raw.githubusercontent.com/TristanBlackwell/warlock/master/scripts/install.sh | bash
             ```
 
+            Then run:
             ```bash
             warlock
             ```
 
-            ### Manual
+            **Manual installation:**
             
             ```bash
             # Download binary
@@ -181,7 +201,7 @@ jobs:
             ### Requirements
             
             - Linux x86_64
-            - Firecracker >= 1.14.1
+            - Firecracker (install with `scripts/install-firecracker.sh`)
             - KVM support
             
             ### Running
