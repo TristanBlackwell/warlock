@@ -81,12 +81,12 @@ pub fn load_or_generate_host_key(key_path: Option<&str>) -> Result<KeyPair> {
 /// 5. Optionally saves the public key (.pub file)
 fn save_host_key(key: &KeyPair, path: &Path) -> Result<()> {
     // Create parent directory if it doesn't exist
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)
-                .context(format!("Failed to create directory {}", parent.display()))?;
-            info!("Created directory: {}", parent.display());
-        }
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .context(format!("Failed to create directory {}", parent.display()))?;
+        info!("Created directory: {}", parent.display());
     }
 
     // Convert russh KeyPair to ssh-key format
@@ -186,7 +186,7 @@ mod tests {
                 "Private key should have 0600 permissions"
             );
 
-            let pub_metadata = fs::metadata(&key_path.with_extension("pub")).unwrap();
+            let pub_metadata = fs::metadata(key_path.with_extension("pub")).unwrap();
             let pub_mode = pub_metadata.permissions().mode();
             assert_eq!(
                 pub_mode & 0o777,

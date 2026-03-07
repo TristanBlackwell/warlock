@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use tracing::{error, info};
 
 /// Handles returned by nftables when adding rules, used for cleanup.
@@ -255,8 +255,7 @@ mod tests {
 
     #[test]
     fn parse_nft_handle_from_output() {
-        let output =
-            "add rule firecracker postrouting ip saddr 172.16.0.2 oifname eth0 counter masquerade # handle 42\n";
+        let output = "add rule firecracker postrouting ip saddr 172.16.0.2 oifname eth0 counter masquerade # handle 42\n";
         assert_eq!(parse_nft_handle(output).unwrap(), 42);
     }
 

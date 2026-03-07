@@ -29,6 +29,12 @@ pub struct SubnetAllocation {
     pub tap_name: String,
 }
 
+impl Default for SubnetPool {
+    fn default() -> Self {
+        SubnetPool::new()
+    }
+}
+
 impl SubnetPool {
     pub fn new() -> Self {
         Self {

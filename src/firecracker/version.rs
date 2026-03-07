@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use semver::Version;
 
 const MIN_FIRECRACKER_VERSION: &str = "1.14.1";
@@ -22,7 +22,7 @@ pub fn parse_and_validate_version(version_output: &str) -> Result<Version> {
     // Split by whitespace and find the part that looks like a version
     let version_str = first_line
         .split_whitespace()
-        .find(|s| s.starts_with('v') || s.chars().next().map_or(false, |c| c.is_ascii_digit()))
+        .find(|s| s.starts_with('v') || s.chars().next().is_some_and(|c| c.is_ascii_digit()))
         .ok_or_else(|| anyhow::anyhow!("No version number found in output: {}", first_line))?
         .trim_start_matches('v');
 

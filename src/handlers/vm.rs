@@ -69,9 +69,7 @@ pub struct ListVmsResponse {
     pub count: usize,
 }
 
-pub async fn list(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ListVmsResponse>, ApiError> {
+pub async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListVmsResponse>, ApiError> {
     let mut vms = state.vms.lock().await;
 
     let mut summaries = Vec::with_capacity(vms.len());
@@ -648,10 +646,10 @@ impl Drop for CreateGuard {
                 if let Some(ref handles) = resources.nat_handles {
                     remove_nat_rules(handles);
                 }
-                if let Some(index) = resources.subnet_index {
-                    if let Ok(mut pool) = self.state.subnet_pool.try_lock() {
-                        pool.release(index);
-                    }
+                if let Some(index) = resources.subnet_index
+                    && let Ok(mut pool) = self.state.subnet_pool.try_lock()
+                {
+                    pool.release(index);
                 }
                 if let Some(ref path) = resources.rootfs_copy {
                     let _ = std::fs::remove_file(path);

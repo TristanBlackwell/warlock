@@ -28,7 +28,7 @@ pub fn validate_vm_config(
     let vcpus = vcpus.unwrap_or(DEFAULT_VCPUS);
     let memory_mb = memory_mb.unwrap_or(DEFAULT_MEMORY_MB);
 
-    if vcpus == 0 || vcpus > MAX_VCPUS || (vcpus > 1 && vcpus % 2 != 0) {
+    if vcpus == 0 || vcpus > MAX_VCPUS || (vcpus > 1 && !vcpus.is_multiple_of(2)) {
         return Err(ConfigError::InvalidVcpus(
             "vcpus must be 1 or an even number between 2 and 32".into(),
         ));

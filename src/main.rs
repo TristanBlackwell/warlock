@@ -98,10 +98,10 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Clean up the per-VM rootfs copy (outside the jailer workspace)
-            if let Some(ref path) = resources.rootfs_copy {
-                if let Err(e) = std::fs::remove_file(path) {
-                    error!(vm_id = %id, error = ?e, "Failed to remove rootfs copy");
-                }
+            if let Some(ref path) = resources.rootfs_copy
+                && let Err(e) = std::fs::remove_file(path)
+            {
+                error!(vm_id = %id, error = ?e, "Failed to remove rootfs copy");
             }
             info!(vm_id = %id, "VM terminated");
         }
