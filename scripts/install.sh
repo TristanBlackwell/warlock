@@ -6,6 +6,29 @@ BINARY_NAME="warlock-linux-x86_64"
 INSTALL_DIR="/usr/local/bin"
 INSTALL_NAME="warlock"
 
+# Optional version parameter (defaults to latest)
+VERSION="${1:-}"
+
+# Helper function to show usage
+usage() {
+  echo "Usage: $0 [VERSION]"
+  echo ""
+  echo "Install warlock binary from GitHub releases."
+  echo ""
+  echo "Arguments:"
+  echo "  VERSION   Optional version tag (e.g., v1.0.0). Defaults to latest release."
+  echo ""
+  echo "Examples:"
+  echo "  $0                    # Install latest version"
+  echo "  $0 v1.0.0             # Install specific version"
+  echo ""
+}
+
+if [ "$VERSION" = "-h" ] || [ "$VERSION" = "--help" ]; then
+  usage
+  exit 0
+fi
+
 # Clean up temp directory on exit
 TEMP_DIR=""
 cleanup() {
@@ -39,11 +62,16 @@ if [ ! -w "$INSTALL_DIR" ]; then
   fi
 fi
 
-info "Fetching latest release..."
-LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
-
-if [ -z "$LATEST_TAG" ]; then
-  error "Failed to determine latest release. Check https://github.com/${REPO}/releases"
+if [ -n "$VERSION" ]; then
+  LATEST_TAG="$VERSION"
+  info "Installing version ${LATEST_TAG}..."
+else
+  info "Fetching latest release..."
+  LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+  
+  if [ -z "$LATEST_TAG" ]; then
+    error "Failed to determine latest release. Check https://github.com/${REPO}/releases"
+  fi
 fi
 
 TEMP_DIR=$(mktemp -d)
