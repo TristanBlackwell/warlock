@@ -1,0 +1,55 @@
+name: Tests (Live)
+
+# Runs the full test suite against real Firecracker microVMs.
+#
+# Requires KVM (nested virtualisation) on the runner, which is available
+# but *not officially supported* on GitHub-hosted Ubuntu runners. If KVM
+# becomes unavailable the job will fail at the preflight-check step rather
+# than producing misleading test results.
+#
+# The job provisions the full Firecracker stack (binary, jailer, kernel,
+# rootfs, networking) using the same install script used for production
+# hosts, then runs `make test-live`.
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-live:
+    name: Live Tests (KVM + Firecracker)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Make /dev/kvm accessible without root. The device exists on GitHub
+      # Ubuntu runners but defaults to root-only permissions.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Verify KVM access
+        run: |
+          ls -la /dev/kvm
+          [ -r /dev/kvm ] && [ -w /dev/kvm ] && echo "KVM is accessible" || (echo "KVM is not accessible" && exit 1)
+
+      - name: Install Firecracker
+        run: sudo bash scripts/install-firecracker.sh
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run live tests
+        run: WARLOCK_LIVE=true cargo test --test vm_lifecycle --verbose -- --nocapture
