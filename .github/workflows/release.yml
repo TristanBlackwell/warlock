@@ -147,11 +147,20 @@ jobs:
             ./artifacts/warlock-linux-x86_64
             ./artifacts/warlock-linux-x86_64.sha256
           body: |
-            ## Warlock Release ${{ steps.version.outputs.version }}
+            ## Installation
+
+            ### Setup script (latest version)
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/TristanBlackwell/warlock/master/scripts/install.sh | bash
+            ```
+
+            ```bash
+            warlock
+            ```
+
+            ### Manual
             
-            ### Installation
-            
-            **Linux (x86_64):**
             ```bash
             # Download binary
             wget https://github.com/TristanBlackwell/warlock/releases/download/${{ steps.version.outputs.version }}/warlock-linux-x86_64
@@ -172,17 +181,13 @@ jobs:
             ### Requirements
             
             - Linux x86_64
-            - Firecracker >= 1.14.1 (for production use)
-            - KVM support (for production use)
+            - Firecracker >= 1.14.1
+            - KVM support
             
             ### Running
             
             ```bash
-            # Development mode (skips Firecracker checks)
-            WARLOCK_DEV=true ./warlock
-            
-            # Production mode
-            ./warlock
+            warlock
             ```
             
             ---

@@ -1,57 +1,25 @@
 # Warlock
 
-Warlock is an experimental control plane for [Firecracker](https://github.com/firecracker-microvm/firecracker) microVMs. It exposes an HTTP API for creating, querying, listing, and deleting virtual machines on a Linux host, with automatic jailer integration for security isolation, per-VM rootfs copies, and resource management.
+Warlock is an experimental control plane layered over [Firecracker](https://github.com/firecracker-microvm/firecracker). 
 
-For a deeper look at how Warlock works internally, see the [architecture overview](docs/architecture.md).
+The project focuses on abstracting the intricacies of Firecracker VMM management. The application can prepare a bare KVM-supported machine and exposes a simple, opinionated HTTP layer for interaction. It supports capacity planning, [jailer](https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md) isolation and machine configuration.
 
-## API
+Warlock is implemented in [Rust](https://www.rust-lang.org/), and uses [Axum](https://github.com/tokio-rs/axum). A more detailed description of architecture is detailed in the [architecture overview](docs/architecture.md).
 
-All endpoints return JSON.
+## Development
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/internal/health` | Liveness probe -- returns `{"status": "ok"}` |
-| `GET` | `/internal/ready` | Readiness probe -- returns status, capacity, VM count, copy strategy |
-| `POST` | `/vm` | Create a VM (202 Accepted) |
-| `GET` | `/vm` | List all VMs with state and resource allocation |
-| `GET` | `/vm/{id}` | Get a specific VM's state |
-| `DELETE` | `/vm/{id}` | Stop and delete a VM |
+### Prerequisites
 
-### Create VM
+- A KVM enabled machine
+- Firecracker >= v1.14.1
+- Rust v1.91+
 
-```bash
-curl -X POST http://localhost:3000/vm \
-  -H "Content-Type: application/json" \
-  -d '{"vcpus": 2, "memory_mb": 256}'
-```
+> [!TIP]
+> I recommend following the [getting started](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md) guide from Firecracker on your intended development machine. This will ensure your machine meets the necessary prerequisites and that you can run Firecracker VMs.
 
-Both fields are optional. Defaults: 1 vCPU, 128 MB memory. Constraints: vCPUs must be 1 or an even number up to 32; memory must be at least 128 MB.
+#### Host Setup
 
-### List VMs
-
-```bash
-curl http://localhost:3000/vm
-```
-
-### Liveness
-
-```bash
-curl http://localhost:3000/internal/health
-```
-
-Minimal probe -- returns 200 if the process is alive.
-
-### Readiness
-
-```bash
-curl http://localhost:3000/internal/ready
-```
-
-Returns capacity, running VM count, allocated resources, and the detected rootfs copy strategy.
-
-## Host Setup
-
-Warlock requires a Linux host with KVM support. The [`install-firecracker.sh`](scripts/install-firecracker.sh) script handles all host prerequisites:
+The [`install-firecracker.sh`](scripts/install-firecracker.sh) script handles all host prerequisites:
 
 - Creates the `firecracker` system user (uid/gid 1100)
 - Downloads Firecracker and jailer binaries
@@ -64,22 +32,6 @@ sudo ./scripts/install-firecracker.sh
 
 > [!IMPORTANT]
 > `/opt/firecracker` and `/srv/jailer` must be on the same filesystem. The jailer uses hard links, which cannot cross filesystem boundaries.
-
-## Configuration
-
-| Variable | Description | Default |
-|---|---|---|
-| `FIRECRACKER_BIN` | Path to the Firecracker binary | Resolved from `PATH` |
-| `JAILER_BIN` | Path to the jailer binary | Resolved from `PATH` |
-| `WARLOCK_DEV` | Set to `true` to skip all Firecracker/KVM/jailer checks | `false` |
-| `RUST_LOG` | Tracing filter directive (e.g. `debug`, `warlock=debug`) | `info` |
-
-## Development
-
-### Prerequisites
-
-- Rust v1.91+
-- Firecracker and a compatible machine (or `WARLOCK_DEV=true` for local development without Firecracker)
 
 ### Getting started
 
@@ -95,13 +47,13 @@ Or with Make:
 make start
 ```
 
-For local development on macOS (where Firecracker is not available):
+Warlock runs preflight checks on startup and will configure the machine environment in preparation for machine creation. It is possible to disable these checks with the `WARLOCK_DEV` environment variable:
 
 ```bash
 WARLOCK_DEV=true cargo run
 ```
 
-## Tests
+### Tests
 
 ```bash
 cargo test
@@ -113,18 +65,26 @@ Or:
 make test
 ```
 
-Tests always run in development mode (`WARLOCK_DEV=true` is set automatically).
+Tests always run in development mode (`WARLOCK_DEV=true` is set automatically). These are static tests that can function without the existence of Firecracker.
 
-## Deployment
+Separately there are tests that will interact with Firecracker for the VM lifecycle. These can be run with `make test-live`
 
-The [release](./.github/workflows/release.yml) workflow builds Warlock for Linux x86_64 on tag push:
+### Configuration
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+| Variable | Description | Default |
+|---|---|---|
+| `FIRECRACKER_BIN` | Path to the Firecracker binary | Resolved from `PATH` |
+| `JAILER_BIN` | Path to the jailer binary | Resolved from `PATH` |
+| `WARLOCK_DEV` | Set to `true` to skip all Firecracker/KVM/jailer checks | `false` |
+| `RUST_LOG` | Tracing filter directive (e.g. `debug`, `warlock=debug`) | `info` |
 
-The workflow can also be dispatched manually.
+## Capabilities
+
+The actions available via Warlock can be found in the [API docs](./docs/api.md)
+
+## Releases
+
+New versions can be found on the [GitHub Releases](https://github.com/TristanBlackwell/warlock/releases) page.
 
 ## Installation
 
