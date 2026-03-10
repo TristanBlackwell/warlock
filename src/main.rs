@@ -1,14 +1,17 @@
 use anyhow::Context;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod app;
 mod capacity;
 mod error;
 mod firecracker;
+mod gateway_client;
 mod handlers;
 mod logging;
 mod ssh;
 mod vm;
+
+use gateway_client::{GatewayClient, spawn_heartbeat_task};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,7 +34,32 @@ async fn main() -> anyhow::Result<()> {
         host_capacity.memory_mb, host_capacity.vcpus
     );
 
-    let (app, state) = app::create_app(host_capacity, jailer_config);
+    // Initialize optional gateway client
+    let gateway_client = match GatewayClient::new() {
+        Ok(Some(client)) => {
+            // Register with gateway
+            if let Err(e) = client.register().await {
+                error!("Failed to register with gateway: {:#}", e);
+                warn!("Continuing without gateway integration");
+                None
+            } else {
+                // Spawn heartbeat task
+                spawn_heartbeat_task(client.clone());
+                Some(client)
+            }
+        }
+        Ok(None) => {
+            info!("Gateway integration disabled (GATEWAY_URL not set)");
+            None
+        }
+        Err(e) => {
+            error!("Failed to initialize gateway client: {:#}", e);
+            warn!("Continuing without gateway integration");
+            None
+        }
+    };
+
+    let (app, state) = app::create_app(host_capacity, jailer_config, gateway_client);
 
     // HTTP server
     let http_listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
@@ -65,6 +93,19 @@ async fn main() -> anyhow::Result<()> {
 
     if vm_count > 0 {
         info!("Shutting down {} VM(s)...", vm_count);
+
+        // Deregister all VMs from gateway
+        if let Some(ref client) = state.gateway_client {
+            info!("Deregistering VMs from gateway...");
+
+            for id in vms.keys() {
+                if let Err(e) = client.deregister_vm(*id).await {
+                    warn!("Failed to deregister VM {} during shutdown: {:#}", id, e);
+                }
+            }
+
+            info!("Gateway cleanup complete");
+        }
 
         for (id, entry) in vms.drain() {
             // Stop the Firecracker instance if it exists (Running state).

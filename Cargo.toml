@@ -8,6 +8,7 @@ anyhow = { version = "1.0.102", features = ["backtrace"] }
 async-trait = "0.1"
 axum = "0.8.8"
 firecracker-rs-sdk = { git = "https://github.com/TristanBlackwell/firecracker-rs-sdk.git", rev = "9270cff", features = ["_rt-tokio"] }
+hostname = "0.4"
 reqwest = { version = "0.13.2", features = ["json"] }
 russh = "0.45"
 russh-keys = "0.45"

@@ -322,6 +322,13 @@ pub async fn create(
 
     info!(vm_id = %vm_id, state = ?desc.state, guest_ip = %guest_ip, "VM instance started");
 
+    // Report to gateway
+    if let Some(ref client) = state.gateway_client
+        && let Err(e) = client.register_vm(vm_id).await
+    {
+        warn!("Failed to register VM {} with gateway: {:#}", vm_id, e);
+    }
+
     Ok((
         StatusCode::ACCEPTED,
         Json(CreateVmResponse {
@@ -554,6 +561,13 @@ pub async fn delete(
     // Clean up the per-VM rootfs copy (outside the jailer workspace)
     if let Some(ref path) = resources.rootfs_copy {
         cleanup_rootfs_copy(&id, path);
+    }
+
+    // Report to gateway
+    if let Some(ref client) = state.gateway_client
+        && let Err(e) = client.deregister_vm(id).await
+    {
+        warn!("Failed to deregister VM {} from gateway: {:#}", id, e);
     }
 
     info!(vm_id = %id, "VM instance terminated and cleaned up");

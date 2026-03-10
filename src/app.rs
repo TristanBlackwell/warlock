@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{
     capacity::Capacity,
     firecracker::{JailerConfig, network::NatHandles},
+    gateway_client::GatewayClient,
     handlers,
     vm::network::SubnetPool,
 };
@@ -76,14 +77,16 @@ pub struct AppState {
     pub jailer: JailerConfig,
     pub vms: Mutex<HashMap<Uuid, VmEntry>>,
     pub subnet_pool: Mutex<SubnetPool>,
+    pub gateway_client: Option<GatewayClient>,
 }
 
-pub fn create_app(capacity: Capacity, jailer: JailerConfig) -> (Router, Arc<AppState>) {
+pub fn create_app(capacity: Capacity, jailer: JailerConfig, gateway_client: Option<GatewayClient>) -> (Router, Arc<AppState>) {
     let state = Arc::new(AppState {
         capacity,
         jailer,
         vms: Mutex::new(HashMap::new()),
         subnet_pool: Mutex::new(SubnetPool::new()),
+        gateway_client,
     });
 
     let router = Router::new()

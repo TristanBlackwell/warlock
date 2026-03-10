@@ -77,6 +77,11 @@ Separately there are tests that will interact with Firecracker for the VM lifecy
 | `JAILER_BIN` | Path to the jailer binary | Resolved from `PATH` |
 | `WARLOCK_DEV` | Set to `true` to skip all Firecracker/KVM/jailer checks | `false` |
 | `RUST_LOG` | Tracing filter directive (e.g. `debug`, `warlock=debug`) | `info` |
+| `GATEWAY_URL` | URL to the Warlock gateway for worker registration and VM lifecycle reporting | Not set (gateway disabled) |
+| `WORKER_ID` | Unique identifier for this worker node (used by gateway) | Hostname |
+| `WORKER_IP` | IP address where this worker is reachable (required if `GATEWAY_URL` is set) | None (must be set explicitly) |
+
+For details on the gateway and related variables, see the [gateway docs](./docs/gateway.md).
 
 ## Capabilities
 
