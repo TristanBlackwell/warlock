@@ -9,7 +9,8 @@
 Warlock is a Firecracker microVM control plane that only runs in production on
 Linux with KVM, the Firecracker binary, the jailer, and a specific filesystem
 layout (`/opt/firecracker`, `/srv/jailer`). Development happens on macOS, and
-CI runs on GitHub Actions (Ubuntu without KVM or Firecracker installed).
+CI runs on GitHub Actions (Ubuntu runners with KVM available via nested
+virtualisation, though not officially supported by GitHub).
 
 This creates a testing gap: the most important code paths (VM creation, jailer
 isolation, rootfs copying, the full lifecycle) cannot execute without the real
@@ -65,10 +66,31 @@ checks and detecting the actual cgroup version and copy strategy.
 cargo test
 make test
 
-# Tier 2 -- provisioned host only
+# Tier 2 -- provisioned host or CI (via reusable workflow)
 make test-live
 # or: WARLOCK_LIVE=true cargo test --test vm_lifecycle -- --nocapture
 ```
+
+### CI Workflows
+
+Both tiers are implemented as reusable workflows (`workflow_call`) so they
+can be composed into any pipeline:
+
+- **`.github/workflows/test.yml`** — Tier 1 unit tests (`WARLOCK_DEV=true`)
+- **`.github/workflows/test-live.yml`** — Tier 2 live tests (enables KVM,
+  provisions Firecracker via `scripts/install-firecracker.sh`, runs
+  `make test-live`)
+
+The release workflow calls both. A future PR-level workflow can do the same
+by adding `uses: ./.github/workflows/test.yml` and/or
+`uses: ./.github/workflows/test-live.yml` to its jobs.
+
+**Note on KVM in CI:** GitHub-hosted Ubuntu runners expose `/dev/kvm` via
+nested virtualisation, but GitHub does not officially support this. The live
+test workflow makes KVM accessible via a udev rule and verifies access
+before proceeding. If GitHub removes KVM support in the future, the live
+test job will fail at the "Verify KVM access" step rather than producing
+misleading results — Tier 1 tests remain unaffected.
 
 ## Alternatives Considered
 
@@ -130,9 +152,10 @@ Use `#[cfg(target_os = "linux")]` to gate live tests at compile time.
 
 ### Negative
 
-- Live tests can only run on a provisioned host, so they are not part of the
-  CI pipeline. Regressions in the Firecracker integration path are caught later
-  (on the droplet) rather than at PR time.
+- Live tests depend on nested virtualisation (KVM) being available on
+  GitHub-hosted runners, which is not officially supported by GitHub. If
+  KVM is removed, live tests would revert to running only on provisioned
+  hosts and the droplet.
 - The two-tier split means some paths are only tested in one tier. Specifically,
   the happy path (create -> get -> delete) is only covered by live tests.
 - Live tests share a single in-process server, so they are not fully isolated

@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Make /dev/kvm accessible without root. The device exists on GitHub
       # Ubuntu runners but defaults to root-only permissions.
@@ -47,7 +47,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.8.2
         with:
           cache-on-failure: true
 
