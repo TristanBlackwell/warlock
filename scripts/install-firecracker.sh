@@ -283,7 +283,7 @@ After=network.target
 [Service]
 Type=simple
 Environment="TERM=xterm-256color"
-ExecStart=/usr/bin/socat VSOCK-LISTEN:1024,fork,reuseaddr EXEC:"/bin/login -f root",pty,stderr,setsid,sigint,sane
+ExecStart=/usr/bin/socat VSOCK-LISTEN:1024,fork,reuseaddr EXEC:"/bin/bash -l",pty,stderr,setsid,sigint,sane
 Restart=always
 RestartSec=5
 
