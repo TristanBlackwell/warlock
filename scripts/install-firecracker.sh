@@ -259,11 +259,13 @@ $SUDO mount --bind /sys "${WORK_DIR}/squashfs-root/sys"
 # Copy resolv.conf for DNS resolution
 $SUDO cp /etc/resolv.conf "${WORK_DIR}/squashfs-root/etc/resolv.conf"
 
-# Install socat (disable GPG checks since we're in a temporary chroot)
+# Install socat and configure root user (disable GPG checks since we're in a temporary chroot)
 $SUDO chroot "${WORK_DIR}/squashfs-root" /bin/bash -c "
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq --allow-insecure-repositories
   apt-get install -y -qq --allow-unauthenticated socat
+  # Clear root password (SSH key auth only)
+  passwd -d root
 "
 
 # Unmount filesystems
@@ -281,7 +283,7 @@ After=network.target
 [Service]
 Type=simple
 Environment="TERM=xterm-256color"
-ExecStart=/usr/bin/socat VSOCK-LISTEN:1024,fork,reuseaddr EXEC:"/bin/login -p",pty,stderr,setsid,sigint,sane
+ExecStart=/usr/bin/socat VSOCK-LISTEN:1024,fork,reuseaddr EXEC:"/bin/login -f root",pty,stderr,setsid,sigint,sane
 Restart=always
 RestartSec=5
 
