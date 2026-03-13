@@ -23,6 +23,8 @@ struct WorkerRegistration {
 struct VmRegistration {
     vm_id: String,
     worker_id: String,
+    vcpus: u8,
+    memory_mb: u32,
 }
 
 impl GatewayClient {
@@ -113,11 +115,13 @@ impl GatewayClient {
     }
 
     /// Register a VM with the gateway
-    pub async fn register_vm(&self, vm_id: Uuid) -> Result<()> {
+    pub async fn register_vm(&self, vm_id: Uuid, vcpus: u8, memory_mb: u32) -> Result<()> {
         let url = format!("{}/vm/register", self.base_url);
         let body = VmRegistration {
             vm_id: vm_id.to_string(),
             worker_id: self.worker_id.clone(),
+            vcpus,
+            memory_mb,
         };
 
         debug!("Registering VM with gateway: {:?}", body);
@@ -131,7 +135,7 @@ impl GatewayClient {
             .error_for_status()
             .context("Gateway returned error on VM registration")?;
 
-        info!("VM {} registered with gateway", vm_id);
+        info!("VM {} registered with gateway ({}vCPU, {}MB)", vm_id, vcpus, memory_mb);
         Ok(())
     }
 

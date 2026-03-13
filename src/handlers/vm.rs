@@ -324,7 +324,7 @@ pub async fn create(
 
     // Report to gateway
     if let Some(ref client) = state.gateway_client
-        && let Err(e) = client.register_vm(vm_id).await
+        && let Err(e) = client.register_vm(vm_id, vcpus, memory_mb).await
     {
         warn!("Failed to register VM {} with gateway: {:#}", vm_id, e);
     }
